@@ -16,9 +16,12 @@
  */
 package org.apache.dubbo.config;
 
-import org.apache.dubbo.common.lang.ShutdownHookCallbacks;
+import org.apache.dubbo.common.config.ConfigurationUtils;
+import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
+import org.apache.dubbo.common.utils.Assert;
+import org.apache.dubbo.rpc.model.ApplicationModel;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -32,9 +35,7 @@ public class DubboShutdownHook extends Thread {
 
     private static final Logger logger = LoggerFactory.getLogger(DubboShutdownHook.class);
 
-    private static final DubboShutdownHook DUBBO_SHUTDOWN_HOOK = new DubboShutdownHook("DubboShutdownHook");
-
-    private final ShutdownHookCallbacks callbacks = ShutdownHookCallbacks.INSTANCE;
+    private final ApplicationModel applicationModel;
 
     /**
      * Has it already been registered or not?
@@ -44,46 +45,51 @@ public class DubboShutdownHook extends Thread {
     /**
      * Has it already been destroyed or not?
      */
-    private static final AtomicBoolean destroyed = new AtomicBoolean(false);
+    private final AtomicBoolean destroyed = new AtomicBoolean(false);
 
-    private DubboShutdownHook(String name) {
-        super(name);
-    }
+    /**
+     * Whether ignore listen on shutdown hook?
+     */
+    private final boolean ignoreListenShutdownHook;
 
-    public static DubboShutdownHook getDubboShutdownHook() {
-        return DUBBO_SHUTDOWN_HOOK;
+    public DubboShutdownHook(ApplicationModel applicationModel) {
+        super("DubboShutdownHook");
+        this.applicationModel = applicationModel;
+        Assert.notNull(this.applicationModel, "ApplicationModel is null");
+        ignoreListenShutdownHook = Boolean.parseBoolean(ConfigurationUtils.getProperty(applicationModel, CommonConstants.IGNORE_LISTEN_SHUTDOWN_HOOK));
+        if (ignoreListenShutdownHook) {
+            logger.info("dubbo.shutdownHook.listenIgnore configured, will ignore add shutdown hook to jvm.");
+        }
     }
 
     @Override
     public void run() {
-        if (destroyed.compareAndSet(false, true)) {
+
+        if (destroyed.compareAndSet(false, true) && !ignoreListenShutdownHook) {
             if (logger.isInfoEnabled()) {
                 logger.info("Run shutdown hook now.");
             }
 
-            callback();
             doDestroy();
         }
     }
 
-    /**
-     * For testing purpose
-     */
-    void clear() {
-        callbacks.clear();
-    }
-
-    private void callback() {
-        callbacks.callback();
+    private void doDestroy() {
+        applicationModel.destroy();
     }
 
     /**
      * Register the ShutdownHook
      */
     public void register() {
-        if (registered.compareAndSet(false, true)) {
-            DubboShutdownHook dubboShutdownHook = getDubboShutdownHook();
-            Runtime.getRuntime().addShutdownHook(dubboShutdownHook);
+        if (registered.compareAndSet(false, true) && !ignoreListenShutdownHook) {
+            try {
+                Runtime.getRuntime().addShutdownHook(this);
+            } catch (IllegalStateException e) {
+                logger.warn("register shutdown hook failed: " + e.getMessage());
+            } catch (Exception e) {
+                logger.warn("register shutdown hook failed: " + e.getMessage(), e);
+            }
         }
     }
 
@@ -91,18 +97,18 @@ public class DubboShutdownHook extends Thread {
      * Unregister the ShutdownHook
      */
     public void unregister() {
-        if (registered.compareAndSet(true, false)) {
-            DubboShutdownHook dubboShutdownHook = getDubboShutdownHook();
-            Runtime.getRuntime().removeShutdownHook(dubboShutdownHook);
-        }
-    }
-
-    /**
-     * Destroy all the resources, including registries and protocols.
-     */
-    public void doDestroy() {
-        if (logger.isInfoEnabled()) {
-            logger.info("Dubbo Service has been destroyed.");
+        if (registered.compareAndSet(true, false) && !ignoreListenShutdownHook) {
+            if (this.isAlive()) {
+                // DubboShutdownHook thread is running
+                return;
+            }
+            try {
+                Runtime.getRuntime().removeShutdownHook(this);
+            } catch (IllegalStateException e) {
+                logger.warn("unregister shutdown hook failed: " + e.getMessage());
+            } catch (Exception e) {
+                logger.warn("unregister shutdown hook failed: " + e.getMessage(), e);
+            }
         }
     }
 

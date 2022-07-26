@@ -20,11 +20,15 @@ package org.apache.dubbo.rpc.cluster.router.mesh.rule;
 import org.apache.dubbo.rpc.cluster.router.mesh.rule.destination.DestinationRule;
 import org.apache.dubbo.rpc.cluster.router.mesh.rule.destination.loadbalance.SimpleLB;
 import org.apache.dubbo.rpc.cluster.router.mesh.rule.virtualservice.VirtualServiceRule;
+
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
 
 import java.util.Map;
 
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.DESTINATION_RULE_KEY;
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.KIND_KEY;
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.VIRTUAL_SERVICE_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -54,7 +58,7 @@ public class DestinationRuleTest {
 
 
         assertEquals("service.dubbo.apache.org/v1alpha1", destinationRule.getApiVersion());
-        assertEquals("DestinationRule", destinationRule.getKind());
+        assertEquals(DESTINATION_RULE_KEY, destinationRule.getKind());
         assertEquals("demo-route", destinationRule.getMetadata().get("name"));
         assertEquals("demo", destinationRule.getSpec().getHost());
         assertEquals(3, destinationRule.getSpec().getSubsets().size());
@@ -87,11 +91,11 @@ public class DestinationRuleTest {
         for (Object result : objectIterable) {
 
             Map resultMap = (Map) result;
-            if (resultMap.get("kind").equals("DestinationRule")) {
+            if (resultMap.get("kind").equals(DESTINATION_RULE_KEY)) {
                 DestinationRule destinationRule = yaml2.loadAs(yaml2.dump(result), DestinationRule.class);
                 System.out.println(destinationRule);
                 assertNotNull(destinationRule);
-            } else if (resultMap.get("kind").equals("VirtualService")) {
+            } else if (resultMap.get(KIND_KEY).equals(VIRTUAL_SERVICE_KEY)) {
                 VirtualServiceRule virtualServiceRule = yaml2.loadAs(yaml2.dump(result), VirtualServiceRule.class);
                 System.out.println(virtualServiceRule);
                 assertNotNull(virtualServiceRule);

@@ -20,6 +20,8 @@ import org.apache.dubbo.common.URL;
 import org.apache.dubbo.rpc.Invoker;
 import org.apache.dubbo.rpc.cluster.LoadBalance;
 import org.apache.dubbo.rpc.cluster.RouterChain;
+import org.apache.dubbo.rpc.cluster.router.state.BitList;
+
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -48,10 +50,10 @@ public class ConsistentHashLoadBalanceTest extends LoadBalanceBaseTest {
         }
 
         Assertions.assertEquals(counter.size() - 1,
-                unHitedInvokerCount, "the number of unHitedInvoker should be counter.size() - 1");
+            unHitedInvokerCount, "the number of unHitedInvoker should be counter.size() - 1");
         Assertions.assertEquals(1, hitedInvokers.size(), "the number of hitedInvoker should be 1");
         Assertions.assertEquals(runs,
-                hitedInvokers.values().iterator().next().intValue(), "the number of hited count should be the number of runs");
+            hitedInvokers.values().iterator().next().intValue(), "the number of hited count should be the number of runs");
     }
 
     // https://github.com/apache/dubbo/issues/5429
@@ -59,12 +61,12 @@ public class ConsistentHashLoadBalanceTest extends LoadBalanceBaseTest {
     void testNormalWhenRouterEnabled() {
         LoadBalance lb = getLoadBalance(ConsistentHashLoadBalance.NAME);
         URL url = invokers.get(0).getUrl();
-        RouterChain<LoadBalanceBaseTest> routerChain = RouterChain.buildChain(url);
+        RouterChain<LoadBalanceBaseTest> routerChain = RouterChain.buildChain(LoadBalanceBaseTest.class, url);
         Invoker<LoadBalanceBaseTest> result = lb.select(invokers, url, invocation);
 
         for (int i = 0; i < 100; i++) {
-            routerChain.setInvokers(invokers);
-            List<Invoker<LoadBalanceBaseTest>> routeInvokers = routerChain.route(url, invocation);
+            routerChain.setInvokers(new BitList<>(invokers));
+            List<Invoker<LoadBalanceBaseTest>> routeInvokers = routerChain.route(url, new BitList<>(invokers), invocation);
             Invoker<LoadBalanceBaseTest> finalInvoker = lb.select(routeInvokers, url, invocation);
             Assertions.assertEquals(result, finalInvoker);
         }

@@ -16,16 +16,18 @@
  */
 package org.apache.dubbo.common.logger;
 
-import org.apache.dubbo.common.extension.ExtensionLoader;
 import org.apache.dubbo.common.logger.jcl.JclLoggerAdapter;
 import org.apache.dubbo.common.logger.jdk.JdkLoggerAdapter;
 import org.apache.dubbo.common.logger.log4j.Log4jLoggerAdapter;
 import org.apache.dubbo.common.logger.log4j2.Log4j2LoggerAdapter;
 import org.apache.dubbo.common.logger.slf4j.Slf4jLoggerAdapter;
 import org.apache.dubbo.common.logger.support.FailsafeLogger;
+import org.apache.dubbo.rpc.model.FrameworkModel;
 
 import java.io.File;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -60,15 +62,17 @@ public class LoggerFactory {
                 break;
             default:
                 List<Class<? extends LoggerAdapter>> candidates = Arrays.asList(
-                        Log4jLoggerAdapter.class,
-                        Slf4jLoggerAdapter.class,
-                        Log4j2LoggerAdapter.class,
-                        JclLoggerAdapter.class,
-                        JdkLoggerAdapter.class
+                    Log4jLoggerAdapter.class,
+                    Slf4jLoggerAdapter.class,
+                    Log4j2LoggerAdapter.class,
+                    JclLoggerAdapter.class,
+                    JdkLoggerAdapter.class
                 );
                 for (Class<? extends LoggerAdapter> clazz : candidates) {
                     try {
-                        setLoggerAdapter(clazz.newInstance());
+                        LoggerAdapter loggerAdapter = clazz.newInstance();
+                        loggerAdapter.getLogger(LoggerFactory.class);
+                        setLoggerAdapter(loggerAdapter);
                         break;
                     } catch (Throwable ignored) {
                     }
@@ -79,9 +83,9 @@ public class LoggerFactory {
     private LoggerFactory() {
     }
 
-    public static void setLoggerAdapter(String loggerAdapter) {
+    public static void setLoggerAdapter(FrameworkModel frameworkModel, String loggerAdapter) {
         if (loggerAdapter != null && loggerAdapter.length() > 0) {
-            setLoggerAdapter(ExtensionLoader.getExtensionLoader(LoggerAdapter.class).getExtension(loggerAdapter));
+            setLoggerAdapter(frameworkModel.getExtensionLoader(LoggerAdapter.class).getExtension(loggerAdapter));
         }
     }
 
@@ -148,6 +152,50 @@ public class LoggerFactory {
      */
     public static File getFile() {
         return LOGGER_ADAPTER.getFile();
+    }
+
+    /**
+     * Get the available adapter names
+     *
+     * @return available adapter names
+     */
+    public static List<String> getAvailableAdapter() {
+        Map<Class<? extends LoggerAdapter>, String> candidates = new HashMap<>();
+        candidates.put(Log4jLoggerAdapter.class, "log4j");
+        candidates.put(Slf4jLoggerAdapter.class, "slf4j");
+        candidates.put(Log4j2LoggerAdapter.class, "log4j2");
+        candidates.put(JclLoggerAdapter.class, "jcl");
+        candidates.put(JdkLoggerAdapter.class, "jdk");
+        List<String> result = new LinkedList<>();
+        for (Map.Entry<Class<? extends LoggerAdapter>, String> entry : candidates.entrySet()) {
+            try {
+                LoggerAdapter loggerAdapter = entry.getKey().newInstance();
+                loggerAdapter.getLogger(LoggerFactory.class);
+                result.add(entry.getValue());
+            } catch (Throwable ignored) {
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Get the current adapter name
+     *
+     * @return current adapter name
+     */
+    public static String getCurrentAdapter() {
+        Map<Class<? extends LoggerAdapter>, String> candidates = new HashMap<>();
+        candidates.put(Log4jLoggerAdapter.class, "log4j");
+        candidates.put(Slf4jLoggerAdapter.class, "slf4j");
+        candidates.put(Log4j2LoggerAdapter.class, "log4j2");
+        candidates.put(JclLoggerAdapter.class, "jcl");
+        candidates.put(JdkLoggerAdapter.class, "jdk");
+
+        String name = candidates.get(LOGGER_ADAPTER.getClass());
+        if (name == null) {
+            name = LOGGER_ADAPTER.getClass().getSimpleName();
+        }
+        return name;
     }
 
 }

@@ -19,23 +19,25 @@ package org.apache.dubbo.registry.support;
 import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
+import org.apache.dubbo.common.threadpool.manager.FrameworkExecutorRepository;
 import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.ConcurrentHashSet;
 import org.apache.dubbo.common.utils.ConfigUtils;
-import org.apache.dubbo.common.utils.NamedThreadFactory;
 import org.apache.dubbo.common.utils.StringUtils;
 import org.apache.dubbo.common.utils.UrlUtils;
 import org.apache.dubbo.registry.NotifyListener;
 import org.apache.dubbo.registry.Registry;
+import org.apache.dubbo.rpc.model.ApplicationModel;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.channels.OverlappingFileLockException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -48,10 +50,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static org.apache.dubbo.common.constants.CommonConstants.ANY_VALUE;
 import static org.apache.dubbo.common.constants.CommonConstants.COMMA_SPLIT_PATTERN;
@@ -61,7 +63,10 @@ import static org.apache.dubbo.common.constants.RegistryConstants.ACCEPTS_KEY;
 import static org.apache.dubbo.common.constants.RegistryConstants.DEFAULT_CATEGORY;
 import static org.apache.dubbo.common.constants.RegistryConstants.DYNAMIC_KEY;
 import static org.apache.dubbo.common.constants.RegistryConstants.EMPTY_PROTOCOL;
+import static org.apache.dubbo.registry.Constants.CACHE;
+import static org.apache.dubbo.registry.Constants.DUBBO_REGISTRY;
 import static org.apache.dubbo.registry.Constants.REGISTRY_FILESAVE_SYNC_KEY;
+import static org.apache.dubbo.registry.Constants.USER_HOME;
 
 /**
  * AbstractRegistry. (SPI, Prototype, ThreadSafe)
@@ -79,26 +84,32 @@ public abstract class AbstractRegistry implements Registry {
     // Local disk cache, where the special key value.registries records the list of registry centers, and the others are the list of notified service providers
     private final Properties properties = new Properties();
     // File cache timing writing
-    private final ExecutorService registryCacheExecutor = Executors.newFixedThreadPool(1, new NamedThreadFactory("DubboSaveRegistryCache", true));
-    // Is it synchronized to save the file
-    private boolean syncSaveFile;
+    private final ExecutorService registryCacheExecutor;
     private final AtomicLong lastCacheChanged = new AtomicLong();
     private final AtomicInteger savePropertiesRetryTimes = new AtomicInteger();
     private final Set<URL> registered = new ConcurrentHashSet<>();
     private final ConcurrentMap<URL, Set<NotifyListener>> subscribed = new ConcurrentHashMap<>();
     private final ConcurrentMap<URL, Map<String, List<URL>>> notified = new ConcurrentHashMap<>();
+    // Is it synchronized to save the file
+    private boolean syncSaveFile;
     private URL registryUrl;
     // Local disk cache file
     private File file;
-    private boolean localCacheEnabled;
+    private final boolean localCacheEnabled;
+    protected RegistryManager registryManager;
+    protected ApplicationModel applicationModel;
 
     public AbstractRegistry(URL url) {
         setUrl(url);
+        registryManager = url.getOrDefaultApplicationModel().getBeanFactory().getBean(RegistryManager.class);
         localCacheEnabled = url.getParameter(REGISTRY_LOCAL_FILE_CACHE_ENABLED, true);
+        registryCacheExecutor = url.getOrDefaultFrameworkModel().getBeanFactory()
+            .getBean(FrameworkExecutorRepository.class).getSharedExecutor();
         if (localCacheEnabled) {
             // Start file save timer
             syncSaveFile = url.getParameter(REGISTRY_FILESAVE_SYNC_KEY, false);
-            String defaultFilename = System.getProperty("user.home") + "/.dubbo/dubbo-registry-" + url.getApplication() + "-" + url.getAddress().replaceAll(":", "-") + ".cache";
+            String defaultFilename = System.getProperty(USER_HOME) + DUBBO_REGISTRY + url.getApplication() +
+                "-" + url.getAddress().replaceAll(":", "-") + CACHE;
             String filename = url.getParameter(FILE_KEY, defaultFilename);
             File file = null;
             if (ConfigUtils.isNotEmpty(filename)) {
@@ -170,8 +181,9 @@ public abstract class AbstractRegistry implements Registry {
             return;
         }
         // Save
+        File lockfile = null;
         try {
-            File lockfile = new File(file.getAbsolutePath() + ".lock");
+            lockfile = new File(file.getAbsolutePath() + ".lock");
             if (!lockfile.exists()) {
                 lockfile.createNewFile();
             }
@@ -179,15 +191,32 @@ public abstract class AbstractRegistry implements Registry {
                  FileChannel channel = raf.getChannel()) {
                 FileLock lock = channel.tryLock();
                 if (lock == null) {
-                    throw new IOException("Can not lock the registry cache file " + file.getAbsolutePath() + ", ignore and retry later, maybe multi java process use the file, please config: dubbo.registry.file=xxx.properties");
+                    throw new IOException("Can not lock the registry cache file " + file.getAbsolutePath() + ", " +
+                        "ignore and retry later, maybe multi java process use the file, please config: dubbo.registry.file=xxx.properties");
                 }
                 // Save
                 try {
                     if (!file.exists()) {
                         file.createNewFile();
                     }
+
+                    Properties tmpProperties;
+                    if (syncSaveFile) {
+                        // When syncReport = true, properties.setProperty and properties.store are called from the same
+                        // thread(reportCacheExecutor), so deep copy is not required
+                        tmpProperties = properties;
+                    } else {
+                        // Using properties.setProperty and properties.store method will cause lock contention
+                        // under multi-threading, so deep copy a new container
+                        tmpProperties = new Properties();
+                        Set<Map.Entry<Object, Object>> entries = properties.entrySet();
+                        for (Map.Entry<Object, Object> entry : entries) {
+                            tmpProperties.setProperty((String) entry.getKey(), (String) entry.getValue());
+                        }
+                    }
+
                     try (FileOutputStream outputFile = new FileOutputStream(file)) {
-                        properties.store(outputFile, "Dubbo Registry Cache");
+                        tmpProperties.store(outputFile, "Dubbo Registry Cache");
                     }
                 } finally {
                     lock.release();
@@ -196,7 +225,12 @@ public abstract class AbstractRegistry implements Registry {
         } catch (Throwable e) {
             savePropertiesRetryTimes.incrementAndGet();
             if (savePropertiesRetryTimes.get() >= MAX_RETRY_TIMES_SAVE_PROPERTIES) {
-                logger.warn("Failed to save registry cache file after retrying " + MAX_RETRY_TIMES_SAVE_PROPERTIES + " times, cause: " + e.getMessage(), e);
+                if (e instanceof OverlappingFileLockException) {
+                    // fix #9341, ignore OverlappingFileLockException
+                    logger.info("Failed to save registry cache file for file overlapping lock exception, file name " + file.getName());
+                } else {
+                    logger.warn("Failed to save registry cache file after retrying " + MAX_RETRY_TIMES_SAVE_PROPERTIES + " times, cause: " + e.getMessage(), e);
+                }
                 savePropertiesRetryTimes.set(0);
                 return;
             }
@@ -204,32 +238,33 @@ public abstract class AbstractRegistry implements Registry {
                 savePropertiesRetryTimes.set(0);
                 return;
             } else {
-                registryCacheExecutor.execute(new SaveProperties(lastCacheChanged.incrementAndGet()));
+                registryCacheExecutor.execute(() -> doSaveProperties(lastCacheChanged.incrementAndGet()));
             }
-            logger.warn("Failed to save registry cache file, will retry, cause: " + e.getMessage(), e);
+            if (!(e instanceof OverlappingFileLockException)) {
+                logger.warn("Failed to save registry cache file, will retry, cause: " + e.getMessage(), e);
+            }
+        } finally {
+            if (lockfile != null) {
+                if (!lockfile.delete()) {
+                    logger.warn(String.format("Failed to delete lock file [%s]", lockfile.getName()));
+                }
+            }
         }
     }
 
     private void loadProperties() {
-        if (file != null && file.exists()) {
-            InputStream in = null;
-            try {
-                in = new FileInputStream(file);
-                properties.load(in);
-                if (logger.isInfoEnabled()) {
-                    logger.info("Loaded registry cache file " + file);
-                }
-            } catch (Throwable e) {
-                logger.warn("Failed to load registry cache file " + file, e);
-            } finally {
-                if (in != null) {
-                    try {
-                        in.close();
-                    } catch (IOException e) {
-                        logger.warn(e.getMessage(), e);
-                    }
-                }
+        if (file == null || !file.exists()) {
+            return;
+        }
+        try (InputStream in = Files.newInputStream(file.toPath())) {
+            properties.load(in);
+            if (logger.isInfoEnabled()) {
+                logger.info("Loaded registry cache file " + file);
             }
+        } catch (IOException e) {
+            logger.warn(e.getMessage(), e);
+        } catch (Throwable e) {
+            logger.warn("Failed to load registry cache file " + file, e);
         }
     }
 
@@ -237,9 +272,8 @@ public abstract class AbstractRegistry implements Registry {
         for (Map.Entry<Object, Object> entry : properties.entrySet()) {
             String key = (String) entry.getKey();
             String value = (String) entry.getValue();
-            if (StringUtils.isNotEmpty(key) && key.equals(url.getServiceKey())
-                    && (Character.isLetter(key.charAt(0)) || key.charAt(0) == '_')
-                    && StringUtils.isNotEmpty(value)) {
+            if (StringUtils.isNotEmpty(key) && key.equals(url.getServiceKey()) && (Character.isLetter(key.charAt(0))
+                || key.charAt(0) == '_') && StringUtils.isNotEmpty(value)) {
                 String[] arr = value.trim().split(URL_SPLIT);
                 List<URL> urls = new ArrayList<>();
                 for (String u : arr) {
@@ -405,8 +439,7 @@ public abstract class AbstractRegistry implements Registry {
         if (listener == null) {
             throw new IllegalArgumentException("notify listener == null");
         }
-        if ((CollectionUtils.isEmpty(urls))
-                && !ANY_VALUE.equals(url.getServiceInterface())) {
+        if ((CollectionUtils.isEmpty(urls)) && !ANY_VALUE.equals(url.getServiceInterface())) {
             logger.warn("Ignore empty notify urls for subscribe url " + url);
             return;
         }
@@ -432,7 +465,7 @@ public abstract class AbstractRegistry implements Registry {
             categoryNotified.put(category, categoryList);
             listener.notify(categoryList);
             // We will update our cache file after each notification.
-            // When our Registry has a subscribe failure due to network jitter, we can return at least the existing cache URL.
+            // When our Registry has a subscribed failure due to network jitter, we can return at least the existing cache URL.
             if (localCacheEnabled) {
                 saveProperties(url);
             }
@@ -462,7 +495,7 @@ public abstract class AbstractRegistry implements Registry {
             if (syncSaveFile) {
                 doSaveProperties(version);
             } else {
-                registryCacheExecutor.execute(new SaveProperties(version));
+                registryCacheExecutor.execute(() -> doSaveProperties(version));
             }
         } catch (Throwable t) {
             logger.warn(t.getMessage(), t);
@@ -505,7 +538,7 @@ public abstract class AbstractRegistry implements Registry {
                 }
             }
         }
-        AbstractRegistryFactory.removeDestroyedRegistry(this);
+        registryManager.removeDestroyedRegistry(this);
     }
 
     protected boolean acceptable(URL urlToRegistry) {
@@ -514,26 +547,25 @@ public abstract class AbstractRegistry implements Registry {
             return true;
         }
 
-        return Arrays.stream(COMMA_SPLIT_PATTERN.split(pattern))
-                .anyMatch(p -> p.equalsIgnoreCase(urlToRegistry.getProtocol()));
+        String[] accepts = COMMA_SPLIT_PATTERN.split(pattern);
+
+        Set<String> allow = Arrays.stream(accepts).filter(p -> !p.startsWith("-")).collect(Collectors.toSet());
+        Set<String> disAllow = Arrays.stream(accepts).filter(p -> p.startsWith("-")).map(p -> p.substring(1)).collect(Collectors.toSet());
+
+        if (CollectionUtils.isNotEmpty(allow)) {
+            // allow first
+            return allow.contains(urlToRegistry.getProtocol());
+        } else if (CollectionUtils.isNotEmpty(disAllow)) {
+            // contains disAllow, deny
+            return !disAllow.contains(urlToRegistry.getProtocol());
+        } else {
+            // default allow
+            return true;
+        }
     }
 
     @Override
     public String toString() {
         return getUrl().toString();
     }
-
-    private class SaveProperties implements Runnable {
-        private long version;
-
-        private SaveProperties(long version) {
-            this.version = version;
-        }
-
-        @Override
-        public void run() {
-            doSaveProperties(version);
-        }
-    }
-
 }

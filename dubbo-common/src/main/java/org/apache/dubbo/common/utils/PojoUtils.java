@@ -16,6 +16,7 @@
  */
 package org.apache.dubbo.common.utils;
 
+import org.apache.dubbo.common.config.ConfigurationUtils;
 import org.apache.dubbo.common.constants.CommonConstants;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
@@ -23,17 +24,20 @@ import org.apache.dubbo.common.logger.LoggerFactory;
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.lang.reflect.WildcardType;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Hashtable;
@@ -41,6 +45,7 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.TreeMap;
 import java.util.WeakHashMap;
@@ -49,6 +54,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+
+import static org.apache.dubbo.common.utils.ClassUtils.isAssignableFrom;
 
 /**
  * PojoUtils. Travel object deeply, and convert complex type to simple type.
@@ -61,13 +68,21 @@ import java.util.function.Supplier;
  * </ul>
  * <p/>
  * Other type will be covert to a map which contains the attributes and value pair of object.
+ *
+ * TODO: exact PojoUtils to scope bean
  */
 public class PojoUtils {
 
     private static final Logger logger = LoggerFactory.getLogger(PojoUtils.class);
     private static final ConcurrentMap<String, Method> NAME_METHODS_CACHE = new ConcurrentHashMap<String, Method>();
     private static final ConcurrentMap<Class<?>, ConcurrentMap<String, Field>> CLASS_FIELD_CACHE = new ConcurrentHashMap<Class<?>, ConcurrentMap<String, Field>>();
-    private static final boolean GENERIC_WITH_CLZ = Boolean.parseBoolean(ConfigUtils.getProperty(CommonConstants.GENERIC_WITH_CLZ_KEY, "true"));
+
+    private static final ConcurrentMap<String, Object> CLASS_NOT_FOUND_CACHE = new ConcurrentHashMap<String, Object>();
+
+    private static final Object NOT_FOUND_VALUE = new Object();
+    private static final boolean GENERIC_WITH_CLZ = Boolean.parseBoolean(ConfigurationUtils.getProperty(CommonConstants.GENERIC_WITH_CLZ_KEY, "true"));
+    private static final List<Class<?>> CLASS_CAN_BE_STRING = Arrays.asList(Byte.class, Short.class, Integer.class,
+        Long.class, Float.class, Double.class, Boolean.class, Character.class);
 
     public static Object[] generalize(Object[] objs) {
         Object[] dests = new Object[objs.length];
@@ -388,10 +403,12 @@ public class PojoUtils {
             Object className = ((Map<Object, Object>) pojo).get("class");
             if (className instanceof String) {
                 SerializeClassChecker.getInstance().validateClass((String) className);
-                try {
-                    type = ClassUtils.forName((String) className);
-                } catch (ClassNotFoundException e) {
-                    // ignore
+                if (!CLASS_NOT_FOUND_CACHE.containsKey(className)) {
+                    try {
+                        type = ClassUtils.forName((String) className);
+                    } catch (ClassNotFoundException e) {
+                        CLASS_NOT_FOUND_CACHE.put((String) className, NOT_FOUND_VALUE);
+                    }
                 }
             }
 
@@ -469,7 +486,18 @@ public class PojoUtils {
                 history.put(pojo, dest);
                 return dest;
             } else {
-                Object dest = newInstance(type);
+                Object dest;
+                if (Throwable.class.isAssignableFrom(type)) {
+                    Object message = map.get("message");
+                    if (message instanceof String) {
+                        dest = newThrowableInstance(type, (String) message);
+                    } else {
+                        dest = newInstance(type);
+                    }
+                } else {
+                    dest = newInstance(type);
+                }
+
                 history.put(pojo, dest);
                 for (Map.Entry<Object, Object> entry : map.entrySet()) {
                     Object key = entry.getKey();
@@ -501,19 +529,6 @@ public class PojoUtils {
                                     throw new RuntimeException("Failed to set field " + name + " of pojo " + dest.getClass().getName() + " : " + e.getMessage(), e);
                                 }
                             }
-                        }
-                    }
-                }
-                if (dest instanceof Throwable) {
-                    Object message = map.get("message");
-                    if (message instanceof String) {
-                        try {
-                            Field field = Throwable.class.getDeclaredField("detailMessage");
-                            if (!field.isAccessible()) {
-                                field.setAccessible(true);
-                            }
-                            field.set(dest, message);
-                        } catch (Exception e) {
                         }
                     }
                 }
@@ -563,39 +578,42 @@ public class PojoUtils {
         return clazz;
     }
 
+    private static Object newThrowableInstance(Class<?> cls, String message) {
+        try {
+            Constructor<?> messagedConstructor = cls.getDeclaredConstructor(String.class);
+            return messagedConstructor.newInstance(message);
+        } catch (Throwable t) {
+            return newInstance(cls);
+        }
+    }
+
     private static Object newInstance(Class<?> cls) {
         try {
             return cls.newInstance();
         } catch (Throwable t) {
-            try {
-                Constructor<?>[] constructors = cls.getDeclaredConstructors();
-                /**
-                 * From Javadoc java.lang.Class#getDeclaredConstructors
-                 * This method returns an array of Constructor objects reflecting all the constructors
-                 * declared by the class represented by this Class object.
-                 * This method returns an array of length 0,
-                 * if this Class object represents an interface, a primitive type, an array class, or void.
-                 */
-                if (constructors.length == 0) {
-                    throw new RuntimeException("Illegal constructor: " + cls.getName());
-                }
-                Constructor<?> constructor = constructors[0];
-                if (constructor.getParameterTypes().length > 0) {
-                    for (Constructor<?> c : constructors) {
-                        if (c.getParameterTypes().length < constructor.getParameterTypes().length) {
-                            constructor = c;
-                            if (constructor.getParameterTypes().length == 0) {
-                                break;
-                            }
-                        }
-                    }
-                }
-                constructor.setAccessible(true);
-                Object[] parameters = Arrays.stream(constructor.getParameterTypes()).map(PojoUtils::getDefaultValue).toArray();
-                return constructor.newInstance(parameters);
-            } catch (InstantiationException | InvocationTargetException | IllegalAccessException e) {
-                throw new RuntimeException(e.getMessage(), e);
+            Constructor<?>[] constructors = cls.getDeclaredConstructors();
+            /*
+              From Javadoc java.lang.Class#getDeclaredConstructors
+              This method returns an array of Constructor objects reflecting all the constructors
+              declared by the class represented by this Class object.
+              This method returns an array of length 0,
+              if this Class object represents an interface, a primitive type, an array class, or void.
+             */
+            if (constructors.length == 0) {
+                throw new RuntimeException("Illegal constructor: " + cls.getName());
             }
+            Throwable lastError = null;
+            Arrays.sort(constructors, Comparator.comparingInt(a -> a.getParameterTypes().length));
+            for (Constructor<?> constructor : constructors) {
+                try {
+                    constructor.setAccessible(true);
+                    Object[] parameters = Arrays.stream(constructor.getParameterTypes()).map(PojoUtils::getDefaultValue).toArray();
+                    return constructor.newInstance(parameters);
+                } catch (Throwable e) {
+                    lastError = e;
+                }
+            }
+            throw new RuntimeException(lastError.getMessage(), lastError);
         }
     }
 
@@ -686,4 +704,92 @@ public class PojoUtils {
         }
     }
 
+    /**
+     * convert map to a specific class instance
+     *
+     * @param map map wait for convert
+     * @param cls the specified class
+     * @param <T> the type of {@code cls}
+     * @return class instance declare in param {@code cls}
+     * @throws ReflectiveOperationException if the instance creation is failed
+     * @since 2.7.10
+     */
+    public static <T> T mapToPojo(Map<String, Object> map, Class<T> cls) throws ReflectiveOperationException {
+        T instance = cls.getDeclaredConstructor().newInstance();
+        Map<String, Field> beanPropertyFields = ReflectUtils.getBeanPropertyFields(cls);
+        for (Map.Entry<String, Field> entry : beanPropertyFields.entrySet()) {
+            String name = entry.getKey();
+            Field field = entry.getValue();
+            Object mapObject = map.get(name);
+            if (mapObject == null) {
+                continue;
+            }
+
+            Type type = field.getGenericType();
+            Object fieldObject = getFieldObject(mapObject, type);
+            field.set(instance, fieldObject);
+        }
+
+        return instance;
+    }
+
+    private static Object getFieldObject(Object mapObject, Type fieldType) throws ReflectiveOperationException {
+        if (fieldType instanceof Class<?>) {
+            return convertClassType(mapObject, (Class<?>) fieldType);
+        } else if (fieldType instanceof ParameterizedType) {
+            return convertParameterizedType(mapObject, (ParameterizedType) fieldType);
+        } else if (fieldType instanceof GenericArrayType || fieldType instanceof TypeVariable<?> || fieldType instanceof WildcardType) {
+            // ignore these type currently
+            return null;
+        } else {
+            throw new IllegalArgumentException("Unrecognized Type: " + fieldType.toString());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object convertClassType(Object mapObject, Class<?> type) throws ReflectiveOperationException {
+        if (type.isPrimitive() || isAssignableFrom(type, mapObject.getClass())) {
+            return mapObject;
+        } else if (Objects.equals(type, String.class) && CLASS_CAN_BE_STRING.contains(mapObject.getClass())) {
+            // auto convert specified type to string
+            return mapObject.toString();
+        } else if (mapObject instanceof Map) {
+            return mapToPojo((Map<String, Object>) mapObject, type);
+        } else {
+            // type didn't match and mapObject is not another Map struct.
+            // we just ignore this situation.
+            return null;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object convertParameterizedType(Object mapObject, ParameterizedType type) throws ReflectiveOperationException {
+        Type rawType = type.getRawType();
+        if (!isAssignableFrom((Class<?>) rawType, mapObject.getClass())) {
+            return null;
+        }
+
+        Type[] actualTypeArguments = type.getActualTypeArguments();
+        if (isAssignableFrom(Map.class, (Class<?>) rawType)) {
+            Map<Object, Object> map = (Map<Object, Object>) mapObject.getClass().getDeclaredConstructor().newInstance();
+            for (Map.Entry<Object, Object> entry : ((Map<Object, Object>) mapObject).entrySet()) {
+                Object key = getFieldObject(entry.getKey(), actualTypeArguments[0]);
+                Object value = getFieldObject(entry.getValue(), actualTypeArguments[1]);
+                map.put(key, value);
+            }
+
+            return map;
+        } else if (isAssignableFrom(Collection.class, (Class<?>) rawType)) {
+            Collection<Object> collection = (Collection<Object>) mapObject.getClass().getDeclaredConstructor().newInstance();
+            for (Object m : (Iterable<?>) mapObject) {
+                Object ele = getFieldObject(m, actualTypeArguments[0]);
+                collection.add(ele);
+            }
+
+            return collection;
+        } else {
+            // ignore other type currently
+            return null;
+        }
+    }
 }

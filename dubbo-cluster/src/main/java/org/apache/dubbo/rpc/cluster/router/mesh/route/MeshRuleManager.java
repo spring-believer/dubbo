@@ -20,35 +20,45 @@ package org.apache.dubbo.rpc.cluster.router.mesh.route;
 import org.apache.dubbo.common.config.configcenter.DynamicConfiguration;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
-import org.apache.dubbo.rpc.model.ApplicationModel;
+import org.apache.dubbo.rpc.cluster.governance.GovernanceRuleRepository;
+import org.apache.dubbo.rpc.cluster.router.mesh.util.MeshRuleListener;
+import org.apache.dubbo.rpc.model.ModuleModel;
 
-import java.util.Collection;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.MESH_RULE_DATA_ID_SUFFIX;
 
-public final class MeshRuleManager {
+public class MeshRuleManager {
 
     public static final Logger logger = LoggerFactory.getLogger(MeshRuleManager.class);
 
-    private static final String MESH_RULE_DATA_ID_SUFFIX = ".MESHAPPRULE";
-    private static final String GROUP = "DEFAULT_GROUP";
+    private final ConcurrentHashMap<String, MeshAppRuleListener> APP_RULE_LISTENERS = new ConcurrentHashMap<>();
 
-    private static final ConcurrentHashMap<String, MeshAppRuleListener> APP_RULE_LISTENERS = new ConcurrentHashMap<>();
+    private final GovernanceRuleRepository ruleRepository;
 
-    public synchronized static void subscribeAppRule(String app) {
+    private final Set<MeshEnvListener> envListeners;
+
+    public MeshRuleManager(ModuleModel moduleModel) {
+        this.ruleRepository = moduleModel.getDefaultExtension(GovernanceRuleRepository.class);
+        Set<MeshEnvListenerFactory> envListenerFactories = moduleModel.getExtensionLoader(MeshEnvListenerFactory.class).getSupportedExtensionInstances();
+        this.envListeners = envListenerFactories.stream()
+            .map(MeshEnvListenerFactory::getListener)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+    }
+
+    private synchronized MeshAppRuleListener subscribeAppRule(String app) {
 
         MeshAppRuleListener meshAppRuleListener = new MeshAppRuleListener(app);
+        // demo-app.MESHAPPRULE
         String appRuleDataId = app + MESH_RULE_DATA_ID_SUFFIX;
-        DynamicConfiguration configuration = ApplicationModel.getEnvironment().getDynamicConfiguration()
-                .orElse(null);
 
-        if (configuration == null) {
-            logger.warn("Doesn't support DynamicConfiguration!");
-            return;
-        }
-
+        // Add listener to rule repository ( dynamic configuration )
         try {
-            String rawConfig = configuration.getConfig(appRuleDataId, GROUP, 5000L);
+            String rawConfig = ruleRepository.getRule(appRuleDataId, DynamicConfiguration.DEFAULT_GROUP, 5000L);
             if (rawConfig != null) {
                 meshAppRuleListener.receiveConfigInfo(rawConfig);
             }
@@ -56,24 +66,57 @@ public final class MeshRuleManager {
             logger.error("get MeshRuleManager app rule failed.", throwable);
         }
 
-        configuration.addListener(appRuleDataId, GROUP, meshAppRuleListener);
+        ruleRepository.addListener(appRuleDataId, DynamicConfiguration.DEFAULT_GROUP, meshAppRuleListener);
+
+        // Add listener to env ( kubernetes, xDS )
+        for (MeshEnvListener envListener : envListeners) {
+            if (envListener.isEnable()) {
+                envListener.onSubscribe(app, meshAppRuleListener);
+            }
+        }
+
         APP_RULE_LISTENERS.put(app, meshAppRuleListener);
+        return meshAppRuleListener;
     }
 
-    public static void register(String app, MeshRuleRouter subscriber) {
+    private synchronized void unsubscribeAppRule(String app, MeshAppRuleListener meshAppRuleListener) {
+        // demo-app.MESHAPPRULE
+        String appRuleDataId = app + MESH_RULE_DATA_ID_SUFFIX;
+
+        // Remove listener from rule repository ( dynamic configuration )
+        ruleRepository.removeListener(appRuleDataId, DynamicConfiguration.DEFAULT_GROUP, meshAppRuleListener);
+
+        // Remove listener from env ( kubernetes, xDS )
+        for (MeshEnvListener envListener : envListeners) {
+            if (envListener.isEnable()) {
+                envListener.onUnSubscribe(app);
+            }
+        }
+
+    }
+
+    public synchronized <T> void register(String app, MeshRuleListener subscriber) {
         MeshAppRuleListener meshAppRuleListener = APP_RULE_LISTENERS.get(app);
         if (meshAppRuleListener == null) {
-            logger.warn("appRuleListener can't find when Router register");
-            return;
+            meshAppRuleListener = subscribeAppRule(app);
         }
         meshAppRuleListener.register(subscriber);
     }
 
-    public static void unregister(MeshRuleRouter subscriber) {
-        Collection<MeshAppRuleListener> listeners = APP_RULE_LISTENERS.values();
-        for (MeshAppRuleListener listener : listeners) {
-            listener.unregister(subscriber);
+    public synchronized <T> void unregister(String app, MeshRuleListener subscriber) {
+        MeshAppRuleListener meshAppRuleListener = APP_RULE_LISTENERS.get(app);
+        meshAppRuleListener.unregister(subscriber);
+        if (meshAppRuleListener.isEmpty()) {
+            unsubscribeAppRule(app, meshAppRuleListener);
+            APP_RULE_LISTENERS.remove(app);
         }
     }
 
+    /**
+     * for ut only
+     */
+    @Deprecated
+    public ConcurrentHashMap<String, MeshAppRuleListener> getAppRuleListeners() {
+        return APP_RULE_LISTENERS;
+    }
 }

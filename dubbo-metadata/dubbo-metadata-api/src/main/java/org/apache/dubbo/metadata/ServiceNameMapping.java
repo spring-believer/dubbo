@@ -18,39 +18,43 @@ package org.apache.dubbo.metadata;
 
 import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.extension.SPI;
+import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.StringUtils;
+import org.apache.dubbo.rpc.model.ScopeModel;
+import org.apache.dubbo.rpc.model.ScopeModelUtil;
+import org.apache.dubbo.rpc.service.Destroyable;
 
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import static java.util.Collections.emptySet;
 import static org.apache.dubbo.common.constants.CommonConstants.COMMA_SEPARATOR;
-import static org.apache.dubbo.common.extension.ExtensionLoader.getExtensionLoader;
-import static org.apache.dubbo.common.utils.StringUtils.SLASH;
+import static org.apache.dubbo.common.extension.ExtensionScope.APPLICATION;
 
 /**
- * The interface for Dubbo service name Mapping
+ * This will interact with remote metadata center to find the interface-app mapping and will cache the data locally.
  *
- * @since 2.7.5
+ * Call variants of getCachedMapping() methods whenever need to use the mapping data.
  */
-@SPI("metadata")
-public interface ServiceNameMapping {
+@SPI(value = "metadata", scope = APPLICATION)
+public interface ServiceNameMapping extends Destroyable {
 
     String DEFAULT_MAPPING_GROUP = "mapping";
 
     /**
      * Map the specified Dubbo service interface, group, version and protocol to current Dubbo service name
      */
-    void map(URL url);
+    boolean map(URL url);
 
     /**
      * Get the default extension of {@link ServiceNameMapping}
      *
      * @return non-null {@link ServiceNameMapping}
      */
-    static ServiceNameMapping getDefaultExtension() {
-        return getExtensionLoader(ServiceNameMapping.class).getDefaultExtension();
+    static ServiceNameMapping getDefaultExtension(ScopeModel scopeModel) {
+        return ScopeModelUtil.getApplicationModel(scopeModel).getDefaultExtension(ServiceNameMapping.class);
     }
 
     static String buildMappingKey(URL url) {
@@ -59,30 +63,60 @@ public interface ServiceNameMapping {
 
     static String buildGroup(String serviceInterface) {
         //the issue : https://github.com/apache/dubbo/issues/4671
-        return DEFAULT_MAPPING_GROUP + SLASH + serviceInterface;
+//        return DEFAULT_MAPPING_GROUP + SLASH + serviceInterface;
+        return serviceInterface;
     }
 
     static String toStringKeys(Set<String> serviceNames) {
-        return serviceNames.toString();
+        if (CollectionUtils.isEmpty(serviceNames)) {
+            return "";
+        }
+
+        StringBuilder builder = new StringBuilder();
+        for (String n : serviceNames) {
+            builder.append(n);
+            builder.append(COMMA_SEPARATOR);
+        }
+
+        builder.deleteCharAt(builder.length() - 1);
+        return builder.toString();
     }
 
     static Set<String> getAppNames(String content) {
         if (StringUtils.isBlank(content)) {
             return emptySet();
         }
-        return new HashSet<>(Arrays.asList(content.split(COMMA_SEPARATOR)));
+        return new TreeSet<>(Arrays.asList(content.split(COMMA_SEPARATOR)));
     }
 
     /**
-     * 1.developer explicitly specifies the application name this interface belongs to
-     * 2.check Interface-App mapping
+     * Init mapping from local storage and url parameter.
+     *
+     * @return app list the current interface maps to, in sequence determined by:
+     * 1. PROVIDED_BY specified by user
+     * 2. snapshot in local file
      */
-    Set<String> getServices(URL subscribedURL);
+    void initInterfaceAppMapping(URL subscribedURL);
 
     /**
-     * 1.developer explicitly specifies the application name this interface belongs to
-     * 2.check Interface-App mapping
-     * 3.use the services specified in registry url.
+     * Get the latest mapping result from remote center and register listener at the same time to get notified once mapping changes.
+     *
+     * @param listener listener that will be notified on mapping change
+     * @return the latest mapping result from remote center
      */
-    Set<String> getAndListenServices(URL registryURL, URL subscribedURL, MappingListener listener);
+    Set<String> getAndListen(URL registryURL, URL subscribedURL, MappingListener listener);
+
+    MappingListener stopListen(URL subscribeURL, MappingListener listener);
+
+    void putCachedMapping(String serviceKey, Set<String> apps);
+
+    Set<String> getCachedMapping(String mappingKey);
+
+    Set<String> getCachedMapping(URL consumerURL);
+
+    Set<String> getRemoteMapping(URL consumerURL);
+
+    Map<String, Set<String>> getCachedMapping();
+
+    Set<String> removeCachedMapping(String serviceKey);
 }

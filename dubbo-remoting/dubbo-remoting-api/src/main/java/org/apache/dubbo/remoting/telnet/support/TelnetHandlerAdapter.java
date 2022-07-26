@@ -26,7 +26,7 @@ import org.apache.dubbo.remoting.telnet.TelnetHandler;
 import org.apache.dubbo.remoting.transport.ChannelHandlerAdapter;
 
 import static org.apache.dubbo.common.constants.CommonConstants.COMMA_SPLIT_PATTERN;
-import static org.apache.dubbo.remoting.Constants.TELNET;
+import static org.apache.dubbo.remoting.Constants.TELNET_KEY;
 
 public class TelnetHandlerAdapter extends ChannelHandlerAdapter implements TelnetHandler {
 
@@ -67,7 +67,7 @@ public class TelnetHandlerAdapter extends ChannelHandlerAdapter implements Telne
                 } else {
                     buf.append("Command: ");
                     buf.append(command);
-                    buf.append(" disabled");
+                    buf.append(" disabled for security reasons, please enable support by listing the commands through 'telnet'");
                 }
             } else {
                 buf.append("Unsupported command: ");
@@ -84,9 +84,9 @@ public class TelnetHandlerAdapter extends ChannelHandlerAdapter implements Telne
     }
 
     private boolean commandEnabled(URL url, String command) {
-        String supportCommands = url.getParameter(TELNET);
+        String supportCommands = url.getParameter(TELNET_KEY);
         if (StringUtils.isEmpty(supportCommands)) {
-            return true;
+            return false;
         }
         String[] commands = COMMA_SPLIT_PATTERN.split(supportCommands);
         for (String c : commands) {

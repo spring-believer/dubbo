@@ -20,7 +20,9 @@ import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.Version;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
+import org.apache.dubbo.common.resource.GlobalResourceInitializer;
 import org.apache.dubbo.common.timer.HashedWheelTimer;
+import org.apache.dubbo.common.timer.Timeout;
 import org.apache.dubbo.common.utils.Assert;
 import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.NamedThreadFactory;
@@ -34,6 +36,7 @@ import org.apache.dubbo.remoting.exchange.ExchangeServer;
 import org.apache.dubbo.remoting.exchange.Request;
 
 import java.net.InetSocketAddress;
+import java.nio.channels.ClosedChannelException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.concurrent.TimeUnit;
@@ -55,12 +58,12 @@ public class HeaderExchangeServer implements ExchangeServer {
     protected final Logger logger = LoggerFactory.getLogger(getClass());
 
     private final RemotingServer server;
-    private AtomicBoolean closed = new AtomicBoolean(false);
 
-    private static final HashedWheelTimer IDLE_CHECK_TIMER = new HashedWheelTimer(new NamedThreadFactory("dubbo-server-idleCheck", true), 1,
-            TimeUnit.SECONDS, TICKS_PER_WHEEL);
+    private final AtomicBoolean closed = new AtomicBoolean(false);
 
-    private CloseTimerTask closeTimerTask;
+    public static GlobalResourceInitializer<HashedWheelTimer> IDLE_CHECK_TIMER = new GlobalResourceInitializer<>(() -> new HashedWheelTimer(new NamedThreadFactory("dubbo-server-idleCheck", true), 1, TimeUnit.SECONDS, TICKS_PER_WHEEL), HashedWheelTimer::stop);
+
+    private Timeout closeTimer;
 
     public HeaderExchangeServer(RemotingServer server) {
         Assert.notNull(server, "server == null");
@@ -78,38 +81,33 @@ public class HeaderExchangeServer implements ExchangeServer {
     }
 
     private boolean isRunning() {
-        Collection<Channel> channels = getChannels();
-        for (Channel channel : channels) {
-
-            /**
-             *  If there are any client connections,
-             *  our server should be running.
-             */
-
-            if (channel.isConnected()) {
-                return true;
-            }
-        }
-        return false;
+        // If there are any client connections,
+        // our server should be running.
+        return getChannels().stream().anyMatch(Channel::isConnected);
     }
 
     @Override
     public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
         doClose();
         server.close();
     }
 
     @Override
     public void close(final int timeout) {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
         startClose();
         if (timeout > 0) {
-            final long max = (long) timeout;
             final long start = System.currentTimeMillis();
             if (getUrl().getParameter(Constants.CHANNEL_SEND_READONLYEVENT_KEY, true)) {
                 sendChannelReadOnlyEvent();
             }
             while (HeaderExchangeServer.this.isRunning()
-                    && System.currentTimeMillis() - start < max) {
+                && System.currentTimeMillis() - start < (long) timeout) {
                 try {
                     Thread.sleep(10);
                 } catch (InterruptedException e) {
@@ -139,21 +137,22 @@ public class HeaderExchangeServer implements ExchangeServer {
                     channel.send(request, getUrl().getParameter(Constants.CHANNEL_READONLYEVENT_SENT_KEY, true));
                 }
             } catch (RemotingException e) {
+                if (closed.get() && e.getCause() instanceof ClosedChannelException) {
+                    // ignore ClosedChannelException which means the connection has been closed. 
+                    continue;
+                }
                 logger.warn("send cannot write message error.", e);
             }
         }
     }
 
     private void doClose() {
-        if (!closed.compareAndSet(false, true)) {
-            return;
-        }
         cancelCloseTask();
     }
 
     private void cancelCloseTask() {
-        if (closeTimerTask != null) {
-            closeTimerTask.cancel();
+        if (closeTimer != null) {
+            closeTimer.cancel();
         }
     }
 
@@ -264,10 +263,9 @@ public class HeaderExchangeServer implements ExchangeServer {
             int idleTimeout = getIdleTimeout(url);
             long idleTimeoutTick = calculateLeastDuration(idleTimeout);
             CloseTimerTask closeTimerTask = new CloseTimerTask(cp, idleTimeoutTick, idleTimeout);
-            this.closeTimerTask = closeTimerTask;
 
             // init task and start timer.
-            IDLE_CHECK_TIMER.newTimeout(closeTimerTask, idleTimeoutTick, TimeUnit.MILLISECONDS);
+            this.closeTimer = IDLE_CHECK_TIMER.get().newTimeout(closeTimerTask, idleTimeoutTick, TimeUnit.MILLISECONDS);
         }
     }
 }

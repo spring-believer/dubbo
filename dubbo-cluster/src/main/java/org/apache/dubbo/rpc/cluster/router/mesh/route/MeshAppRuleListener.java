@@ -17,85 +17,132 @@
 
 package org.apache.dubbo.rpc.cluster.router.mesh.route;
 
+import org.apache.dubbo.common.config.configcenter.ConfigChangeType;
 import org.apache.dubbo.common.config.configcenter.ConfigChangedEvent;
 import org.apache.dubbo.common.config.configcenter.ConfigurationListener;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
-import org.apache.dubbo.rpc.cluster.router.mesh.rule.VsDestinationGroup;
-import org.apache.dubbo.rpc.cluster.router.mesh.rule.destination.DestinationRule;
-import org.apache.dubbo.rpc.cluster.router.mesh.rule.virtualservice.VirtualServiceRule;
-import org.apache.dubbo.rpc.cluster.router.mesh.util.VsDestinationGroupRuleDispatcher;
+import org.apache.dubbo.common.utils.CollectionUtils;
+import org.apache.dubbo.rpc.cluster.router.mesh.util.MeshRuleDispatcher;
+import org.apache.dubbo.rpc.cluster.router.mesh.util.MeshRuleListener;
 
 import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
+import org.yaml.snakeyaml.representer.Representer;
 
 import java.text.MessageFormat;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
+
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.METADATA_KEY;
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.NAME_KEY;
+import static org.apache.dubbo.rpc.cluster.router.mesh.route.MeshRuleConstants.STANDARD_ROUTER_KEY;
 
 
 public class MeshAppRuleListener implements ConfigurationListener {
 
     public static final Logger logger = LoggerFactory.getLogger(MeshAppRuleListener.class);
 
-    private final VsDestinationGroupRuleDispatcher vsDestinationGroupRuleDispatcher = new VsDestinationGroupRuleDispatcher();
+    private final MeshRuleDispatcher meshRuleDispatcher;
 
     private final String appName;
 
-    private VsDestinationGroup vsDestinationGroupHolder;
+    private volatile Map<String, List<Map<String, Object>>> ruleMapHolder;
 
     public MeshAppRuleListener(String appName) {
         this.appName = appName;
+        this.meshRuleDispatcher = new MeshRuleDispatcher(appName);
     }
 
+    @SuppressWarnings("unchecked")
     public void receiveConfigInfo(String configInfo) {
-        if(logger.isDebugEnabled()) {
+        if (logger.isDebugEnabled()) {
             logger.debug(MessageFormat.format("[MeshAppRule] Received rule for app [{0}]: {1}.",
-                    appName, configInfo));
+                appName, configInfo));
         }
         try {
+            Map<String, List<Map<String, Object>>> groupMap = new HashMap<>();
 
-            VsDestinationGroup vsDestinationGroup = new VsDestinationGroup();
-            vsDestinationGroup.setAppName(appName);
+            Representer representer = new Representer();
+            representer.getPropertyUtils().setSkipMissingProperties(true);
+            Yaml yaml = new Yaml(new SafeConstructor(), representer);
+            Iterable<Object> yamlIterator = yaml.loadAll(configInfo);
 
-            Yaml yaml = new Yaml();
-            Yaml yaml2 = new Yaml();
-            Iterable<Object> objectIterable = yaml.loadAll(configInfo);
-            for (Object result : objectIterable) {
+            for (Object obj : yamlIterator) {
+                if (obj instanceof Map) {
+                    Map<String, Object> resultMap = (Map<String, Object>) obj;
 
-                Map resultMap = (Map) result;
-                if ("DestinationRule".equals(resultMap.get("kind"))) {
-                    DestinationRule destinationRule = yaml2.loadAs(yaml2.dump(result), DestinationRule.class);
-                    vsDestinationGroup.getDestinationRuleList().add(destinationRule);
-
-                } else if ("VirtualService".equals(resultMap.get("kind"))) {
-                    VirtualServiceRule virtualServiceRule = yaml2.loadAs(yaml2.dump(result), VirtualServiceRule.class);
-                    vsDestinationGroup.getVirtualServiceRuleList().add(virtualServiceRule);
+                    String ruleType = computeRuleType(resultMap);
+                    if (ruleType != null) {
+                        groupMap.computeIfAbsent(ruleType, (k)-> new LinkedList<>()).add(resultMap);
+                    } else {
+                        logger.error("Unable to get rule type from raw rule. " +
+                            "Probably the metadata.name is absent. App Name: " + appName + " RawRule: " + configInfo);
+                    }
+                } else {
+                    logger.error("Rule format is unacceptable. App Name: " + appName + " RawRule: " + configInfo);
                 }
             }
 
-            vsDestinationGroupHolder = vsDestinationGroup;
+            ruleMapHolder = groupMap;
         } catch (Exception e) {
             logger.error("[MeshAppRule] parse failed: " + configInfo, e);
         }
-        if (vsDestinationGroupHolder != null) {
-            vsDestinationGroupRuleDispatcher.post(vsDestinationGroupHolder);
+        if (ruleMapHolder != null) {
+            meshRuleDispatcher.post(ruleMapHolder);
         }
-
     }
 
-    public void register(MeshRuleRouter subscriber) {
-        if (vsDestinationGroupHolder != null) {
-            subscriber.onRuleChange(vsDestinationGroupHolder);
+    @SuppressWarnings("unchecked")
+    private String computeRuleType(Map<String, Object> rule) {
+        Object obj = rule.get(METADATA_KEY);
+        if (obj instanceof Map && CollectionUtils.isNotEmptyMap((Map<String, String>) obj)) {
+            Map<String, String> metadata = (Map<String, String>) obj;
+            String name = metadata.get(NAME_KEY);
+            if (!name.contains(".")) {
+                return STANDARD_ROUTER_KEY;
+            } else {
+                return name.substring(name.indexOf(".") + 1);
+            }
         }
-        vsDestinationGroupRuleDispatcher.register(subscriber);
+        return null;
+    }
+
+    public <T> void register(MeshRuleListener subscriber) {
+        if (ruleMapHolder != null) {
+            List<Map<String, Object>> rule = ruleMapHolder.get(subscriber.ruleSuffix());
+            if (rule != null) {
+                subscriber.onRuleChange(appName, rule);
+            }
+        }
+        meshRuleDispatcher.register(subscriber);
     }
 
 
-    public void unregister(MeshRuleRouter sub) {
-        vsDestinationGroupRuleDispatcher.unregister(sub);
+    public <T> void unregister(MeshRuleListener subscriber) {
+        meshRuleDispatcher.unregister(subscriber);
     }
 
     @Override
     public void process(ConfigChangedEvent event) {
+        if (event.getChangeType() == ConfigChangeType.DELETED) {
+            receiveConfigInfo("");
+            return;
+        }
         receiveConfigInfo(event.getContent());
+    }
+
+    public boolean isEmpty() {
+        return meshRuleDispatcher.isEmpty();
+    }
+
+    /**
+     * For ut only
+     */
+    @Deprecated
+    public MeshRuleDispatcher getMeshRuleDispatcher() {
+        return meshRuleDispatcher;
     }
 }

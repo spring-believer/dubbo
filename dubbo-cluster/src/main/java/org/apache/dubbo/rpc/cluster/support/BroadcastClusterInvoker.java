@@ -24,10 +24,13 @@ import org.apache.dubbo.rpc.Invoker;
 import org.apache.dubbo.rpc.Result;
 import org.apache.dubbo.rpc.RpcContext;
 import org.apache.dubbo.rpc.RpcException;
+import org.apache.dubbo.rpc.RpcInvocation;
 import org.apache.dubbo.rpc.cluster.Directory;
 import org.apache.dubbo.rpc.cluster.LoadBalance;
 
 import java.util.List;
+
+import static org.apache.dubbo.rpc.Constants.ASYNC_KEY;
 
 /**
  * BroadcastClusterInvoker
@@ -66,37 +69,42 @@ public class BroadcastClusterInvoker<T> extends AbstractClusterInvoker<T> {
         int failIndex = 0;
         for (Invoker<T> invoker : invokers) {
             try {
-                result = invokeWithContext(invoker, invocation);
+                RpcInvocation subInvocation = new RpcInvocation(invocation, invoker);
+                subInvocation.setAttachment(ASYNC_KEY, "true");
+                result = invokeWithContext(invoker, subInvocation);
                 if (null != result && result.hasException()) {
                     Throwable resultException = result.getException();
                     if (null != resultException) {
                         exception = getRpcException(result.getException());
                         logger.warn(exception.getMessage(), exception);
+                        failIndex++;
                         if (failIndex == failThresholdIndex) {
                             break;
-                        } else {
-                            failIndex++;
                         }
                     }
                 }
             } catch (Throwable e) {
                 exception = getRpcException(e);
                 logger.warn(exception.getMessage(), exception);
+                failIndex++;
                 if (failIndex == failThresholdIndex) {
                     break;
-                } else {
-                    failIndex++;
                 }
             }
         }
 
         if (exception != null) {
             if (failIndex == failThresholdIndex) {
-                logger.debug(
+                if (logger.isDebugEnabled()) {
+                    logger.debug(
                         String.format("The number of BroadcastCluster call failures has reached the threshold %s", failThresholdIndex));
+
+                }
             } else {
-                logger.debug(String.format("The number of BroadcastCluster call failures has not reached the threshold %s, fail size is %s",
-                        failIndex));
+                if (logger.isDebugEnabled()) {
+                    logger.debug(String.format("The number of BroadcastCluster call failures has not reached the threshold %s, fail size is %s",
+                        failThresholdIndex, failIndex));
+                }
             }
             throw exception;
         }
@@ -105,7 +113,7 @@ public class BroadcastClusterInvoker<T> extends AbstractClusterInvoker<T> {
     }
 
     private RpcException getRpcException(Throwable throwable) {
-        RpcException rpcException = null;
+        RpcException rpcException;
         if (throwable instanceof RpcException) {
             rpcException = (RpcException) throwable;
         } else {

@@ -37,7 +37,9 @@ import org.apache.dubbo.rpc.RpcException;
 import java.net.InetSocketAddress;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.apache.dubbo.common.constants.CommonConstants.ANYHOST_KEY;
@@ -135,15 +137,21 @@ public abstract class AbstractProxyProtocol extends AbstractProtocol {
                 super.destroy();
                 target.destroy();
                 invokers.remove(this);
+                AbstractProxyProtocol.this.destroyInternal(url);
             }
         };
         invokers.add(invoker);
         return invoker;
     }
 
+    // used to destroy unused clients and other resource
+    protected void destroyInternal(URL url) {
+        // subclass override
+    }
+
     protected RpcException getRpcException(Class<?> type, URL url, Invocation invocation, Throwable e) {
         RpcException re = new RpcException("Failed to invoke remote service: " + type + ", method: "
-                + invocation.getMethodName() + ", cause: " + e.getMessage(), e);
+            + invocation.getMethodName() + ", cause: " + e.getMessage(), e);
         re.setCode(getErrorCode(e));
         return re;
     }
@@ -168,6 +176,7 @@ public abstract class AbstractProxyProtocol extends AbstractProtocol {
 
         private RemotingServer server;
         private String address;
+        private Map<String, Object> attributes = new ConcurrentHashMap<>();
 
         public ProxyProtocolServer(RemotingServer server) {
             this.server = server;
@@ -196,6 +205,11 @@ public abstract class AbstractProxyProtocol extends AbstractProtocol {
         @Override
         public void close() {
             server.close();
+        }
+
+        @Override
+        public Map<String, Object> getAttributes() {
+            return attributes;
         }
     }
 

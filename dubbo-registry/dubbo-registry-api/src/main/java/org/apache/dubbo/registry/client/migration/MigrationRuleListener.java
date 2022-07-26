@@ -24,6 +24,7 @@ import org.apache.dubbo.common.config.configcenter.DynamicConfiguration;
 import org.apache.dubbo.common.extension.Activate;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
+import org.apache.dubbo.common.threadpool.manager.FrameworkExecutorRepository;
 import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.NamedThreadFactory;
 import org.apache.dubbo.common.utils.StringUtils;
@@ -32,46 +33,71 @@ import org.apache.dubbo.registry.integration.RegistryProtocol;
 import org.apache.dubbo.registry.integration.RegistryProtocolListener;
 import org.apache.dubbo.rpc.Exporter;
 import org.apache.dubbo.rpc.cluster.ClusterInvoker;
-import org.apache.dubbo.rpc.model.ApplicationModel;
+import org.apache.dubbo.rpc.model.ModuleModel;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.dubbo.common.constants.RegistryConstants.INIT;
 
+/**
+ * Listens to {@MigrationRule} from Config Center.
+ *
+ * - Migration rule is of consumer application scope.
+ * - Listener is shared among all invokers (interfaces), it keeps the relation between interface and handler.
+ *
+ * There are two execution points:
+ * - Refer, invoker behaviour is determined with default rule.
+ * - Rule change, invoker behaviour is changed according to the newly received rule.
+ */
 @Activate
 public class MigrationRuleListener implements RegistryProtocolListener, ConfigurationListener {
     private static final Logger logger = LoggerFactory.getLogger(MigrationRuleListener.class);
     private static final String DUBBO_SERVICEDISCOVERY_MIGRATION = "DUBBO_SERVICEDISCOVERY_MIGRATION";
     private static final String MIGRATION_DELAY_KEY = "dubbo.application.migration.delay";
-    private final String RULE_KEY = ApplicationModel.getName() + ".migration";
+    private static final int MIGRATION_DEFAULT_DELAY_TIME = 60000;
+    private String ruleKey;
 
-    private final Map<MigrationInvoker, MigrationRuleHandler> handlers = new ConcurrentHashMap<>();
-    private final LinkedBlockingQueue<String> ruleQueue = new LinkedBlockingQueue<>();
+    protected final Map<MigrationInvoker, MigrationRuleHandler> handlers = new ConcurrentHashMap<>();
+    protected final LinkedBlockingQueue<String> ruleQueue = new LinkedBlockingQueue<>();
 
     private final AtomicBoolean executorSubmit = new AtomicBoolean(false);
     private final ExecutorService ruleManageExecutor = Executors.newFixedThreadPool(1, new NamedThreadFactory("Dubbo-Migration-Listener"));
+
+    protected ScheduledFuture<?> localRuleMigrationFuture;
+    protected Future<?> ruleMigrationFuture;
 
     private DynamicConfiguration configuration;
 
     private volatile String rawRule;
     private volatile MigrationRule rule;
+    private ModuleModel moduleModel;
 
-    public MigrationRuleListener() {
-        this.configuration = ApplicationModel.getEnvironment().getDynamicConfiguration().orElse(null);
+    public MigrationRuleListener(ModuleModel moduleModel) {
+        this.moduleModel = moduleModel;
+        init();
+    }
+
+    private void init() {
+        this.ruleKey = moduleModel.getApplicationModel().getApplicationName() + ".migration";
+        this.configuration = moduleModel.getModelEnvironment().getDynamicConfiguration().orElse(null);
 
         if (this.configuration != null) {
-            logger.info("Listening for migration rules on dataId " + RULE_KEY + ", group " + DUBBO_SERVICEDISCOVERY_MIGRATION);
-            configuration.addListener(RULE_KEY, DUBBO_SERVICEDISCOVERY_MIGRATION, this);
+            logger.info("Listening for migration rules on dataId " + ruleKey + ", group " + DUBBO_SERVICEDISCOVERY_MIGRATION);
+            configuration.addListener(ruleKey, DUBBO_SERVICEDISCOVERY_MIGRATION, this);
 
-            String rawRule = configuration.getConfig(RULE_KEY, DUBBO_SERVICEDISCOVERY_MIGRATION);
+            String rawRule = configuration.getConfig(ruleKey, DUBBO_SERVICEDISCOVERY_MIGRATION);
             if (StringUtils.isEmpty(rawRule)) {
                 rawRule = INIT;
             }
@@ -83,9 +109,10 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
             setRawRule(INIT);
         }
 
-        String localRawRule = ApplicationModel.getEnvironment().getLocalMigrationRule();
+        String localRawRule = moduleModel.getModelEnvironment().getLocalMigrationRule();
         if (!StringUtils.isEmpty(localRawRule)) {
-            Executors.newSingleThreadScheduledExecutor(new NamedThreadFactory("DubboMigrationRuleDelayWorker", true))
+            localRuleMigrationFuture = moduleModel.getApplicationModel().getFrameworkModel().getBeanFactory()
+                .getBean(FrameworkExecutorRepository.class).getSharedScheduledExecutor()
                 .schedule(() -> {
                     if (this.rawRule.equals(INIT)) {
                         this.process(new ConfigChangedEvent(null, null, localRawRule));
@@ -95,8 +122,8 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
     }
 
     private int getDelay() {
-        int delay = 60000;
-        String delayStr = ConfigurationUtils.getProperty(MIGRATION_DELAY_KEY);
+        int delay = MIGRATION_DEFAULT_DELAY_TIME;
+        String delayStr = ConfigurationUtils.getProperty(moduleModel, MIGRATION_DELAY_KEY);
         if (StringUtils.isEmpty(delayStr)) {
             return delay;
         }
@@ -124,7 +151,7 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
         }
 
         if (executorSubmit.compareAndSet(false, true)) {
-            ruleManageExecutor.submit(() -> {
+            ruleMigrationFuture = ruleManageExecutor.submit(() -> {
                 while (true) {
                     String rule = "";
                     try {
@@ -150,18 +177,26 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
 
                         if (CollectionUtils.isNotEmptyMap(handlers)) {
                             ExecutorService executorService = Executors.newFixedThreadPool(100, new NamedThreadFactory("Dubbo-Invoker-Migrate"));
-                            CountDownLatch countDownLatch = new CountDownLatch(handlers.size());
-
-                            handlers.forEach((_key, handler) ->
-                                executorService.submit(() -> {
+                            List<Future<?>> migrationFutures = new ArrayList<>(handlers.size());
+                            handlers.forEach((_key, handler) -> {
+                               Future<?> future = executorService.submit(() -> {
                                     handler.doMigrate(this.rule);
-                                    countDownLatch.countDown();
-                                }));
+                                });
+                               migrationFutures.add(future);
+                            });
 
-                            try {
-                                countDownLatch.await(1, TimeUnit.HOURS);
-                            } catch (InterruptedException e) {
-                                logger.error("Wait Invoker Migrate interrupted!", e);
+                            Throwable migrationException = null;
+                            for (Future<?> future : migrationFutures) {
+                                try {
+                                    future.get();
+                                } catch (InterruptedException ie) {
+                                    logger.warn("Interrupted while waiting for migration async task to finish.");
+                                } catch (ExecutionException ee) {
+                                    migrationException = ee.getCause();
+                                }
+                            }
+                            if (migrationException != null) {
+                                logger.error("Migration async task failed.", migrationException);
                             }
                             executorService.shutdown();
                         }
@@ -180,9 +215,9 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
     }
 
     private MigrationRule parseRule(String rawRule) {
-        MigrationRule tmpRule = rule == null ? MigrationRule.INIT : rule;
+        MigrationRule tmpRule = rule == null ? MigrationRule.getInitRule() : rule;
         if (INIT.equals(rawRule)) {
-            tmpRule = MigrationRule.INIT;
+            tmpRule = MigrationRule.getInitRule();
         } else {
             try {
                 tmpRule = MigrationRule.parse(rawRule);
@@ -211,8 +246,18 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
     @Override
     public void onDestroy() {
         if (configuration != null) {
-            configuration.removeListener(RULE_KEY, this);
+            configuration.removeListener(ruleKey, DUBBO_SERVICEDISCOVERY_MIGRATION, this);
         }
+        if (ruleMigrationFuture != null) {
+            ruleMigrationFuture.cancel(true);
+        }
+        if (localRuleMigrationFuture != null) {
+            localRuleMigrationFuture.cancel(true);
+        }
+        if (ruleManageExecutor != null) {
+            ruleManageExecutor.shutdown();
+        }
+        ruleQueue.clear();
     }
 
     public Map<MigrationInvoker, MigrationRuleHandler> getHandlers() {
@@ -221,5 +266,9 @@ public class MigrationRuleListener implements RegistryProtocolListener, Configur
 
     protected void removeMigrationInvoker(MigrationInvoker<?> migrationInvoker) {
         handlers.remove(migrationInvoker);
+    }
+
+    public MigrationRule getRule() {
+        return rule;
     }
 }

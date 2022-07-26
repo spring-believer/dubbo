@@ -17,8 +17,12 @@
 
 package com.alibaba.dubbo.rpc;
 
+import org.apache.dubbo.rpc.model.ServiceModel;
+
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
 
 @Deprecated
 public interface Invocation extends org.apache.dubbo.rpc.Invocation {
@@ -59,6 +63,7 @@ public interface Invocation extends org.apache.dubbo.rpc.Invocation {
         setObjectAttachmentIfAbsent(key, value);
     }
 
+
     @Override
     default String getServiceName() {
         return null;
@@ -71,6 +76,16 @@ public interface Invocation extends org.apache.dubbo.rpc.Invocation {
 
     @Override
     default String getAttachment(String key, String defaultValue) {
+        return null;
+    }
+
+    @Override
+    default void setServiceModel(ServiceModel serviceModel) {
+
+    }
+
+    @Override
+    default ServiceModel getServiceModel() {
         return null;
     }
 
@@ -92,6 +107,16 @@ public interface Invocation extends org.apache.dubbo.rpc.Invocation {
     @Override
     default Map<String, Object> getObjectAttachments() {
         return Collections.emptyMap();
+    }
+
+    @Override
+    default Map<String, Object> copyObjectAttachments() {
+        return new HashMap<>(getObjectAttachments());
+    }
+
+    @Override
+    default void foreachAttachment(Consumer<Map.Entry<String, Object>> consumer) {
+        getObjectAttachments().entrySet().forEach(consumer);
     }
 
     @Override
@@ -128,6 +153,11 @@ public interface Invocation extends org.apache.dubbo.rpc.Invocation {
         }
 
         @Override
+        public String getServiceName() {
+            return null;
+        }
+
+        @Override
         public Class<?>[] getParameterTypes() {
             return delegate.getParameterTypes();
         }
@@ -155,6 +185,16 @@ public interface Invocation extends org.apache.dubbo.rpc.Invocation {
         @Override
         public Invoker<?> getInvoker() {
             return new Invoker.CompatibleInvoker(delegate.getInvoker());
+        }
+
+        @Override
+        public void setServiceModel(ServiceModel serviceModel) {
+            delegate.setServiceModel(serviceModel);
+        }
+
+        @Override
+        public ServiceModel getServiceModel() {
+            return delegate.getServiceModel();
         }
 
         @Override

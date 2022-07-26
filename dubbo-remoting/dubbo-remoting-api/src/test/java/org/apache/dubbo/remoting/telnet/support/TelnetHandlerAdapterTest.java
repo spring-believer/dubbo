@@ -20,6 +20,7 @@ import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.utils.StringUtils;
 import org.apache.dubbo.remoting.Channel;
 import org.apache.dubbo.remoting.RemotingException;
+
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -52,7 +53,7 @@ class TelnetHandlerAdapterTest {
         Assertions.assertEquals(expectedResult, telnetHandlerAdapter.telnet(channel, message));
 
         message = "--no-prompt help";
-        expectedResult = "Command: help disabled\r\n";
+        expectedResult = "Command: help disabled for security reasons, please enable support by listing the commands through 'telnet'\r\n";
         Assertions.assertEquals(expectedResult, telnetHandlerAdapter.telnet(channel, message));
 
         message = "--no-prompt";
@@ -60,7 +61,7 @@ class TelnetHandlerAdapterTest {
         Assertions.assertEquals(expectedResult, telnetHandlerAdapter.telnet(channel, message));
 
         message = "help";
-        expectedResult = "Command: help disabled\r\ndubbo>";
+        expectedResult = "Command: help disabled for security reasons, please enable support by listing the commands through 'telnet'\r\ndubbo>";
         Assertions.assertEquals(expectedResult, telnetHandlerAdapter.telnet(channel, message));
     }
 }

@@ -33,6 +33,8 @@ import org.apache.dubbo.remoting.transport.netty4.NettyCodecAdapter;
 import org.apache.dubbo.rpc.AppResponse;
 import org.apache.dubbo.rpc.RpcInvocation;
 import org.apache.dubbo.rpc.model.ApplicationModel;
+import org.apache.dubbo.rpc.model.FrameworkModel;
+import org.apache.dubbo.rpc.model.ModuleServiceRepository;
 import org.apache.dubbo.rpc.protocol.dubbo.DecodeableRpcInvocation;
 import org.apache.dubbo.rpc.protocol.dubbo.DubboCodec;
 import org.apache.dubbo.rpc.protocol.dubbo.support.DemoService;
@@ -50,6 +52,8 @@ import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.apache.dubbo.rpc.Constants.SERIALIZATION_SECURITY_CHECK_KEY;
 
 /**
  * These junit tests aim to test unpack and stick pack of dubbo and telnet
@@ -69,13 +73,19 @@ public class DubboTelnetDecodeTest {
 
     @BeforeAll
     public static void setup() {
-        ApplicationModel.getServiceRepository().destroy();
-        ApplicationModel.getServiceRepository().registerService(DemoService.class);
+        ModuleServiceRepository serviceRepository = ApplicationModel.defaultModel().getDefaultModule().getServiceRepository();
+        serviceRepository.registerService(DemoService.class);
+
+        // disable org.apache.dubbo.remoting.transport.CodecSupport.checkSerialization to avoid error:
+        // java.io.IOException: Service org.apache.dubbo.rpc.protocol.dubbo.support.DemoService with version 0.0.0 not found, invocation rejected.
+        System.setProperty(SERIALIZATION_SECURITY_CHECK_KEY, "false");
     }
 
     @AfterAll
     public static void teardown() {
-        ApplicationModel.getServiceRepository().destroy();
+        FrameworkModel.defaultModel().destroy();
+        System.clearProperty(SERIALIZATION_SECURITY_CHECK_KEY);
+
     }
 
     /**
@@ -466,8 +476,11 @@ public class DubboTelnetDecodeTest {
 
         ByteBuf dubboByteBuf = Unpooled.buffer();
         ChannelBuffer buffer = new NettyBackedChannelBuffer(dubboByteBuf);
-        DubboCodec dubboCodec = new DubboCodec();
+        DubboCodec dubboCodec = new DubboCodec(FrameworkModel.defaultModel());
         dubboCodec.encode(new MockChannel(), buffer, request);
+
+        // register
+        // frameworkModel.getServiceRepository().registerProviderUrl();
 
         return dubboByteBuf;
     }

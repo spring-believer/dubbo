@@ -19,6 +19,7 @@ package org.apache.dubbo.registry.client.migration.model;
 import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.config.ConfigurationUtils;
 import org.apache.dubbo.common.utils.CollectionUtils;
+import org.apache.dubbo.common.utils.StringUtils;
 import org.apache.dubbo.metadata.ServiceNameMapping;
 
 import org.yaml.snakeyaml.Yaml;
@@ -28,12 +29,21 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.dubbo.registry.Constants.MIGRATION_DELAY_KEY;
 import static org.apache.dubbo.registry.Constants.MIGRATION_FORCE_KEY;
 import static org.apache.dubbo.registry.Constants.MIGRATION_PROMOTION_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_APPLICATIONS_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_DELAY_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_FORCE_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_INTERFACES_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_PROPORTION_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_STEP_KEY;
+import static org.apache.dubbo.registry.Constants.MIGRATION_RULE_THRESHOLD_KEY;
 import static org.apache.dubbo.registry.Constants.MIGRATION_STEP_KEY;
 import static org.apache.dubbo.registry.Constants.MIGRATION_THRESHOLD_KEY;
 import static org.apache.dubbo.registry.client.migration.MigrationRuleHandler.DUBBO_SERVICEDISCOVERY_MIGRATION;
@@ -66,7 +76,6 @@ import static org.apache.dubbo.registry.client.migration.MigrationRuleHandler.DU
  *    step: FORCE_INTERFACE
  */
 public class MigrationRule {
-    public static final MigrationRule INIT = new MigrationRule();
 
     private String key;
     private MigrationStep step;
@@ -80,43 +89,47 @@ public class MigrationRule {
     private transient Map<String, SubMigrationRule> interfaceRules;
     private transient Map<String, SubMigrationRule> applicationRules;
 
+    public static MigrationRule getInitRule() {
+        return new MigrationRule();
+    }
+
     @SuppressWarnings("unchecked")
     private static MigrationRule parseFromMap(Map<String, Object> map) {
         MigrationRule migrationRule = new MigrationRule();
-        migrationRule.setKey((String) map.get("key"));
+        migrationRule.setKey((String) map.get(MIGRATION_RULE_KEY));
 
-        Object step = map.get("step");
+        Object step = map.get(MIGRATION_RULE_STEP_KEY);
         if (step != null) {
             migrationRule.setStep(MigrationStep.valueOf(step.toString()));
         }
 
-        Object threshold = map.get("threshold");
+        Object threshold = map.get(MIGRATION_RULE_THRESHOLD_KEY);
         if (threshold != null) {
             migrationRule.setThreshold(Float.valueOf(threshold.toString()));
         }
 
-        Object proportion = map.get("proportion");
+        Object proportion = map.get(MIGRATION_RULE_PROPORTION_KEY);
         if (proportion != null) {
             migrationRule.setProportion(Integer.valueOf(proportion.toString()));
         }
 
-        Object delay = map.get("delay");
+        Object delay = map.get(MIGRATION_RULE_DELAY_KEY);
         if (delay != null) {
             migrationRule.setDelay(Integer.valueOf(delay.toString()));
         }
 
-        Object force = map.get("force");
+        Object force = map.get(MIGRATION_RULE_FORCE_KEY);
         if (force != null) {
             migrationRule.setForce(Boolean.valueOf(force.toString()));
         }
 
-        Object interfaces = map.get("interfaces");
+        Object interfaces = map.get(MIGRATION_RULE_INTERFACES_KEY);
         if (interfaces != null && List.class.isAssignableFrom(interfaces.getClass())) {
             migrationRule.setInterfaces(((List<Map<String, Object>>) interfaces).stream()
                     .map(SubMigrationRule::parseFromMap).collect(Collectors.toList()));
         }
 
-        Object applications = map.get("applications");
+        Object applications = map.get(MIGRATION_RULE_APPLICATIONS_KEY);
         if (applications != null && List.class.isAssignableFrom(applications.getClass())) {
             migrationRule.setApplications(((List<Map<String, Object>>) applications).stream()
                 .map(SubMigrationRule::parseFromMap).collect(Collectors.toList()));
@@ -151,27 +164,40 @@ public class MigrationRule {
         }
 
         if (applications != null) {
-            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension();
-            Set<String> services = serviceNameMapping.getServices(consumerURL);
+            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension(consumerURL.getScopeModel());
+            Set<String> services = serviceNameMapping.getRemoteMapping(consumerURL);
             if (CollectionUtils.isNotEmpty(services)) {
                 for (String service : services) {
                     SubMigrationRule rule = applicationRules.get(service);
-                    if (rule.getStep() != null) {
-                        return rule.getStep();
+                    if (rule != null) {
+                        if (rule.getStep() != null) {
+                            return rule.getStep();
+                        }
                     }
                 }
             }
         }
 
+        /**
+         * FIXME, it's really hard to follow setting default values here.
+         */
         if (step == null) {
             // initial step : APPLICATION_FIRST
             step = MigrationStep.APPLICATION_FIRST;
             step = Enum.valueOf(MigrationStep.class,
-                consumerURL.getParameter(MIGRATION_STEP_KEY,
-                    ConfigurationUtils.getCachedDynamicProperty(DUBBO_SERVICEDISCOVERY_MIGRATION, step.name())));
+                consumerURL.getParameter(MIGRATION_STEP_KEY, getDefaultStep(consumerURL, step.name())));
         }
 
         return step;
+    }
+
+    private String getDefaultStep(URL consumerURL, String defaultStep) {
+        String globalDefaultStep = ConfigurationUtils.getCachedDynamicProperty(consumerURL.getScopeModel(), DUBBO_SERVICEDISCOVERY_MIGRATION, null);
+        if (StringUtils.isEmpty(globalDefaultStep)) {
+            // check 'dubbo.application.service-discovery.migration' for compatibility
+            globalDefaultStep = ConfigurationUtils.getCachedDynamicProperty(consumerURL.getScopeModel(), "dubbo.application.service-discovery.migration", defaultStep);
+        }
+        return globalDefaultStep;
     }
 
     public MigrationStep getStep() {
@@ -189,8 +215,8 @@ public class MigrationRule {
         }
 
         if (applications != null) {
-            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension();
-            Set<String> services = serviceNameMapping.getServices(consumerURL);
+            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension(consumerURL.getScopeModel());
+            Set<String> services = serviceNameMapping.getRemoteMapping(consumerURL);
             if (CollectionUtils.isNotEmpty(services)) {
                 for (String service : services) {
                     SubMigrationRule rule = applicationRules.get(service);
@@ -229,8 +255,8 @@ public class MigrationRule {
         }
 
         if (applications != null) {
-            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension();
-            Set<String> services = serviceNameMapping.getServices(consumerURL);
+            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension(consumerURL.getScopeModel());
+            Set<String> services = serviceNameMapping.getRemoteMapping(consumerURL);
             if (CollectionUtils.isNotEmpty(services)) {
                 for (String service : services) {
                     SubMigrationRule rule = applicationRules.get(service);
@@ -265,8 +291,8 @@ public class MigrationRule {
         }
 
         if (applications != null) {
-            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension();
-            Set<String> services = serviceNameMapping.getServices(consumerURL);
+            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension(consumerURL.getScopeModel());
+            Set<String> services = serviceNameMapping.getRemoteMapping(consumerURL);
             if (CollectionUtils.isNotEmpty(services)) {
                 for (String service : services) {
                     SubMigrationRule rule = applicationRules.get(service);
@@ -305,8 +331,8 @@ public class MigrationRule {
         }
 
         if (applications != null) {
-            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension();
-            Set<String> services = serviceNameMapping.getServices(consumerURL);
+            ServiceNameMapping serviceNameMapping = ServiceNameMapping.getDefaultExtension(consumerURL.getScopeModel());
+            Set<String> services = serviceNameMapping.getRemoteMapping(consumerURL);
             if (CollectionUtils.isNotEmpty(services)) {
                 for (String service : services) {
                     SubMigrationRule rule = applicationRules.get(service);
@@ -352,7 +378,6 @@ public class MigrationRule {
                 applicationRules.put(rule.getServiceKey(), rule);
             });
         }
-
     }
 
     public static MigrationRule parse(String rawRule) {
@@ -365,5 +390,22 @@ public class MigrationRule {
         Constructor constructor = new Constructor(MigrationRule.class);
         Yaml yaml = new Yaml(constructor);
         return yaml.dump(rule);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        MigrationRule that = (MigrationRule) o;
+        return Objects.equals(key, that.key) && step == that.step && Objects.equals(threshold, that.threshold) && Objects.equals(proportion, that.proportion) && Objects.equals(delay, that.delay) && Objects.equals(force, that.force) && Objects.equals(interfaces, that.interfaces) && Objects.equals(applications, that.applications) && Objects.equals(interfaceRules, that.interfaceRules) && Objects.equals(applicationRules, that.applicationRules);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(key, step, threshold, proportion, delay, force, interfaces, applications, interfaceRules, applicationRules);
     }
 }

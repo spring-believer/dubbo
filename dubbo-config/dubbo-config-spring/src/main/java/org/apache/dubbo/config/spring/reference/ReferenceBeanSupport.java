@@ -16,12 +16,14 @@
  */
 package org.apache.dubbo.config.spring.reference;
 
-import com.alibaba.spring.util.AnnotationUtils;
 import org.apache.dubbo.common.utils.Assert;
 import org.apache.dubbo.common.utils.StringUtils;
 import org.apache.dubbo.config.spring.Constants;
 import org.apache.dubbo.config.spring.ReferenceBean;
+import org.apache.dubbo.config.spring.util.DubboAnnotationUtils;
 import org.apache.dubbo.rpc.service.GenericService;
+
+import com.alibaba.spring.util.AnnotationUtils;
 import org.springframework.beans.MutablePropertyValues;
 import org.springframework.beans.PropertyValue;
 import org.springframework.beans.factory.config.BeanDefinition;
@@ -46,9 +48,12 @@ import java.util.Set;
 import java.util.TreeMap;
 
 import static org.apache.dubbo.common.utils.StringUtils.join;
-import static org.apache.dubbo.config.spring.reference.ReferenceCreator.convertStringArrayToMap;
 
 public class ReferenceBeanSupport {
+
+    private static List<String> IGNORED_ATTRS = Arrays.asList(ReferenceAttributes.ID, ReferenceAttributes.GROUP,
+        ReferenceAttributes.VERSION, ReferenceAttributes.INTERFACE, ReferenceAttributes.INTERFACE_NAME,
+        ReferenceAttributes.INTERFACE_CLASS);
 
     public static void convertReferenceProps(Map<String, Object> attributes, Class defaultInterfaceClass) {
 
@@ -58,8 +63,16 @@ public class ReferenceBeanSupport {
             interfaceName = (String) attributes.get(ReferenceAttributes.INTERFACE_NAME);
         }
         if (interfaceName == null) {
-            Class clazz = (Class) attributes.get(ReferenceAttributes.INTERFACE_CLASS);
-            interfaceName = clazz != null ? clazz.getName() : null;
+            Object interfaceClassValue = attributes.get(ReferenceAttributes.INTERFACE_CLASS);
+            if (interfaceClassValue instanceof Class) {
+                interfaceName = ((Class) interfaceClassValue).getName();
+            } else if (interfaceClassValue instanceof String) {
+                if (interfaceClassValue.equals("void")) {
+                    attributes.remove(ReferenceAttributes.INTERFACE_CLASS);
+                } else {
+                    interfaceName = (String) interfaceClassValue;
+                }
+            }
         }
         if (interfaceName == null && defaultInterfaceClass != GenericService.class) {
             interfaceName = defaultInterfaceClass.getName();
@@ -81,7 +94,7 @@ public class ReferenceBeanSupport {
         // String[] registry => String registryIds
         String[] registryIds = (String[]) attributes.get(ReferenceAttributes.REGISTRY);
         if (registryIds != null) {
-            String value = join((String[]) registryIds, ",");
+            String value = join(registryIds, ",");
             attributes.remove(ReferenceAttributes.REGISTRY);
             attributes.put(ReferenceAttributes.REGISTRY_IDS, value);
         }
@@ -110,11 +123,8 @@ public class ReferenceBeanSupport {
         //sort attributes keys
         List<String> sortedAttrKeys = new ArrayList<>(attributes.keySet());
         Collections.sort(sortedAttrKeys);
-        List<String> ignoredAttrs = Arrays.asList(ReferenceAttributes.ID, ReferenceAttributes.GROUP,
-            ReferenceAttributes.VERSION, ReferenceAttributes.INTERFACE, ReferenceAttributes.INTERFACE_NAME,
-            ReferenceAttributes.INTERFACE_CLASS);
         for (String key : sortedAttrKeys) {
-            if (ignoredAttrs.contains(key)) {
+            if (IGNORED_ATTRS.contains(key)) {
                 continue;
             }
             Object value = attributes.get(key);
@@ -140,10 +150,6 @@ public class ReferenceBeanSupport {
             // resolve placeholder with Spring BeanFactory ( using PropertyResourceConfigurer/PropertySourcesPlaceholderConfigurer )
             referenceKey = ((AbstractBeanFactory) applicationContext.getAutowireCapableBeanFactory()).resolveEmbeddedValue(referenceKey);
         }
-        // The property placeholder maybe not resolved if is early init
-        // if (referenceKey != null && referenceKey.contains("${")) {
-        //     throw new IllegalStateException("Reference key contains unresolved placeholders ${..} : " + referenceKey);
-        // }
         return referenceKey;
     }
 
@@ -153,7 +159,7 @@ public class ReferenceBeanSupport {
         }
         if (ReferenceAttributes.PARAMETERS.equals(key) && obj instanceof String[]) {
             //convert parameters array pairs to map
-            obj = convertStringArrayToMap((String[]) obj);
+            obj = DubboAnnotationUtils.convertParameters((String[]) obj);
         }
 
         //to string

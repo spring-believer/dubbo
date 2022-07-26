@@ -21,10 +21,19 @@ import org.apache.dubbo.common.url.component.ServiceConfigURL;
 import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.StringUtils;
 import org.apache.dubbo.config.support.Parameter;
+import org.apache.dubbo.rpc.model.ApplicationModel;
 
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.apache.dubbo.common.constants.CommonConstants.CYCLE_REPORT_KEY;
+import static org.apache.dubbo.common.constants.CommonConstants.METADATA;
+import static org.apache.dubbo.common.constants.CommonConstants.PROTOCOL_KEY;
+import static org.apache.dubbo.common.constants.CommonConstants.REPORT_DEFINITION_KEY;
+import static org.apache.dubbo.common.constants.CommonConstants.REPORT_METADATA_KEY;
+import static org.apache.dubbo.common.constants.CommonConstants.RETRY_PERIOD_KEY;
+import static org.apache.dubbo.common.constants.CommonConstants.RETRY_TIMES_KEY;
+import static org.apache.dubbo.common.constants.CommonConstants.SYNC_REPORT_KEY;
 import static org.apache.dubbo.common.constants.RemotingConstants.BACKUP_KEY;
 import static org.apache.dubbo.common.utils.PojoUtils.updatePropertyIfAbsent;
 import static org.apache.dubbo.common.utils.StringUtils.isEmpty;
@@ -40,7 +49,9 @@ public class MetadataReportConfig extends AbstractConfig {
 
     private String protocol;
 
-    // metadata center address
+    /**
+     * metadata center address
+     */
     private String address;
 
     /**
@@ -48,13 +59,19 @@ public class MetadataReportConfig extends AbstractConfig {
      */
     private Integer port;
 
-    // Username to login metadata center
+    /**
+     * Username to login metadata center
+     */
     private String username;
 
-    // Password to login metadata center
+    /**
+     * Password to login metadata center
+     */
     private String password;
 
-    // Request timeout in milliseconds for metadata center
+    /**
+     * Request timeout in milliseconds for metadata center
+     */
     private Integer timeout;
 
     /**
@@ -62,14 +79,16 @@ public class MetadataReportConfig extends AbstractConfig {
      */
     private String group;
 
-    // Customized parameters
+    /**
+     * Customized parameters
+     */
     private Map<String, String> parameters;
 
     private Integer retryTimes;
 
     private Integer retryPeriod;
     /**
-     * By default the metadatastore will store full metadata repeatedly every day .
+     * By default, the metadata store will store full metadata repeatedly every day .
      */
     private Boolean cycleReport;
 
@@ -93,11 +112,30 @@ public class MetadataReportConfig extends AbstractConfig {
      */
     private String file;
 
+    /**
+     * Decide the behaviour when initial connection try fails,
+     * 'true' means interrupt the whole process once fail.
+     * The default value is true
+     */
+    private Boolean check;
+
+    private Boolean reportMetadata;
+
+    private Boolean reportDefinition;
 
     public MetadataReportConfig() {
     }
 
+    public MetadataReportConfig(ApplicationModel applicationModel) {
+        super(applicationModel);
+    }
+
     public MetadataReportConfig(String address) {
+        setAddress(address);
+    }
+
+    public MetadataReportConfig(ApplicationModel applicationModel, String address) {
+        super(applicationModel);
         setAddress(address);
     }
 
@@ -106,8 +144,8 @@ public class MetadataReportConfig extends AbstractConfig {
         if (isEmpty(address)) {
             throw new IllegalArgumentException("The address of metadata report is invalid.");
         }
-        Map<String, String> map = new HashMap<String, String>();
-        URL url = URL.valueOf(address);
+        Map<String, String> map = new HashMap<>();
+        URL url = URL.valueOf(address, getScopeModel());
         // Issue : https://github.com/apache/dubbo/issues/6491
         // Append the parameters from address
         map.putAll(url.getParameters());
@@ -116,10 +154,10 @@ public class MetadataReportConfig extends AbstractConfig {
         // Normalize the parameters
         map.putAll(convert(map, null));
         // put the protocol of URL as the "metadata"
-        map.put("metadata", url.getProtocol());
-        return new ServiceConfigURL("metadata", url.getUsername(), url.getPassword(), url.getHost(),
-                url.getPort(), url.getPath(), map);
-
+        map.put(METADATA, isEmpty(url.getProtocol()) ? map.get(PROTOCOL_KEY) : url.getProtocol());
+        return new ServiceConfigURL(METADATA, StringUtils.isBlank(url.getUsername()) ? this.getUsername() : url.getUsername(),
+            StringUtils.isBlank(url.getPassword()) ? this.getPassword() : url.getPassword(), url.getHost(),
+            url.getPort(), url.getPath(), map).setScopeModel(getScopeModel());
     }
 
     public String getProtocol() {
@@ -154,7 +192,8 @@ public class MetadataReportConfig extends AbstractConfig {
                 updateParameters(params);
             } catch (Exception ignored) {
             }
-        }    }
+        }
+    }
 
     public Integer getPort() {
         return port;
@@ -196,7 +235,7 @@ public class MetadataReportConfig extends AbstractConfig {
         this.parameters = parameters;
     }
 
-    @Parameter(key = "retry-times")
+    @Parameter(key = RETRY_TIMES_KEY)
     public Integer getRetryTimes() {
         return retryTimes;
     }
@@ -205,7 +244,7 @@ public class MetadataReportConfig extends AbstractConfig {
         this.retryTimes = retryTimes;
     }
 
-    @Parameter(key = "retry-period")
+    @Parameter(key = RETRY_PERIOD_KEY)
     public Integer getRetryPeriod() {
         return retryPeriod;
     }
@@ -214,7 +253,7 @@ public class MetadataReportConfig extends AbstractConfig {
         this.retryPeriod = retryPeriod;
     }
 
-    @Parameter(key = "cycle-report")
+    @Parameter(key = CYCLE_REPORT_KEY)
     public Boolean getCycleReport() {
         return cycleReport;
     }
@@ -223,7 +262,7 @@ public class MetadataReportConfig extends AbstractConfig {
         this.cycleReport = cycleReport;
     }
 
-    @Parameter(key = "sync-report")
+    @Parameter(key = SYNC_REPORT_KEY)
     public Boolean getSyncReport() {
         return syncReport;
     }
@@ -279,5 +318,31 @@ public class MetadataReportConfig extends AbstractConfig {
         } else {
             this.parameters.putAll(parameters);
         }
+    }
+
+    public Boolean isCheck() {
+        return check;
+    }
+
+    public void setCheck(Boolean check) {
+        this.check = check;
+    }
+
+    @Parameter(key = REPORT_METADATA_KEY)
+    public Boolean getReportMetadata() {
+        return reportMetadata;
+    }
+
+    public void setReportMetadata(Boolean reportMetadata) {
+        this.reportMetadata = reportMetadata;
+    }
+
+    @Parameter(key = REPORT_DEFINITION_KEY)
+    public Boolean getReportDefinition() {
+        return reportDefinition;
+    }
+
+    public void setReportDefinition(Boolean reportDefinition) {
+        this.reportDefinition = reportDefinition;
     }
 }

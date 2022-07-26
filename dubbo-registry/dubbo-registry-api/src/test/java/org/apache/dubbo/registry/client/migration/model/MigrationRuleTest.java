@@ -18,19 +18,30 @@ package org.apache.dubbo.registry.client.migration.model;
 
 import org.apache.dubbo.common.URL;
 import org.apache.dubbo.metadata.ServiceNameMapping;
-import org.apache.dubbo.metadata.WritableMetadataService;
+import org.apache.dubbo.rpc.model.ApplicationModel;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
+import static org.apache.dubbo.common.constants.RegistryConstants.REGISTRY_CLUSTER_TYPE_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class MigrationRuleTest {
+    private static ServiceNameMapping mapping = mock(ServiceNameMapping.class);
 
     @Test
     public void test_parse() {
+        when(mapping.getCachedMapping(any(URL.class))).thenReturn(Collections.emptySet());
+
         String rule = "key: demo-consumer\n" +
             "step: APPLICATION_FIRST\n" +
             "threshold: 1.0\n" +
@@ -63,9 +74,15 @@ public class MigrationRuleTest {
         assertEquals(false, migrationRule.getForce());
 
         URL url = Mockito.mock(URL.class);
-        Mockito.when(url.getDisplayServiceKey()).thenReturn("DemoService:1.0.0");
+        ApplicationModel defaultModel = Mockito.spy(ApplicationModel.defaultModel());
+        Mockito.when(defaultModel.getDefaultExtension(ServiceNameMapping.class)).thenReturn(mapping);
 
-        assertEquals(migrationRule.getInterfaces().size(), 2);
+        Mockito.when(url.getScopeModel()).thenReturn(defaultModel);
+        Mockito.when(url.getDisplayServiceKey()).thenReturn("DemoService:1.0.0");
+        Mockito.when(url.getParameter(ArgumentMatchers.eq(REGISTRY_CLUSTER_TYPE_KEY), anyString())).thenReturn("default");
+        Mockito.when(url.getParameter(ArgumentMatchers.eq(REGISTRY_CLUSTER_TYPE_KEY), anyString())).thenReturn("default");
+
+        assertEquals(2, migrationRule.getInterfaces().size());
 
         assertEquals(0.5f, migrationRule.getThreshold(url));
         assertEquals(30, migrationRule.getProportion(url));
@@ -82,13 +99,18 @@ public class MigrationRuleTest {
 
         Mockito.when(url.getDisplayServiceKey()).thenReturn("GreetingService:1.0.1");
         Mockito.when(url.getServiceInterface()).thenReturn("GreetingService");
-        WritableMetadataService.getDefaultExtension().putCachedMapping(ServiceNameMapping.buildMappingKey(url), Collections.singleton("TestApplication"));
+        when(mapping.getRemoteMapping(any(URL.class))).thenReturn(Collections.singleton("TestApplication"));
+
+        Set<String> services = new HashSet<>();
+        services.add("TestApplication");
+        when(mapping.getCachedMapping(any(URL.class))).thenReturn(services);
         assertEquals(0.3f, migrationRule.getThreshold(url));
         assertEquals(20, migrationRule.getProportion(url));
         assertEquals(10, migrationRule.getDelay(url));
         assertEquals(false, migrationRule.getForce(url));
         assertEquals(MigrationStep.FORCE_INTERFACE, migrationRule.getStep(url));
+        when(mapping.getCachedMapping(any(URL.class))).thenReturn(Collections.emptySet());
 
-        WritableMetadataService.getDefaultExtension().removeCachedMapping("GreetingService");
+        ApplicationModel.defaultModel().destroy();
     }
 }

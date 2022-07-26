@@ -17,12 +17,15 @@
 package org.apache.dubbo.rpc.protocol.dubbo;
 
 import org.apache.dubbo.common.URL;
+import org.apache.dubbo.common.utils.ClassUtils;
 import org.apache.dubbo.common.utils.NetUtils;
 import org.apache.dubbo.remoting.Constants;
 import org.apache.dubbo.rpc.Exporter;
 import org.apache.dubbo.rpc.Invoker;
 import org.apache.dubbo.rpc.RpcException;
 import org.apache.dubbo.rpc.model.ApplicationModel;
+import org.apache.dubbo.rpc.model.ConsumerModel;
+import org.apache.dubbo.rpc.model.ModuleServiceRepository;
 import org.apache.dubbo.rpc.protocol.dubbo.support.ProtocolUtils;
 
 import org.junit.jupiter.api.AfterEach;
@@ -59,14 +62,15 @@ public class ArgumentCallbackTest {
         // export one service first, to test connection sharing
         serviceURL = serviceURL.addParameter("connections", 1);
         URL hellourl = serviceURL.setPath(IHelloService.class.getName());
-        ApplicationModel.getServiceRepository().registerService(IDemoService.class);
-        ApplicationModel.getServiceRepository().registerService(IHelloService.class);
+        ModuleServiceRepository serviceRepository = ApplicationModel.defaultModel().getDefaultModule().getServiceRepository();
+        serviceRepository.registerService(IDemoService.class);
+        serviceRepository.registerService(IHelloService.class);
         hello_exporter = ProtocolUtils.export(new HelloServiceImpl(), IHelloService.class, hellourl);
         exporter = ProtocolUtils.export(new DemoServiceImpl(), IDemoService.class, serviceURL);
     }
 
     void referService() {
-        ApplicationModel.getServiceRepository().registerService(IDemoService.class);
+        ApplicationModel.defaultModel().getDefaultModule().getServiceRepository().registerService(IDemoService.class);
         demoProxy = (IDemoService) ProtocolUtils.refer(IDemoService.class, consumerUrl);
     }
 
@@ -82,8 +86,11 @@ public class ArgumentCallbackTest {
                 + "&unxxx2.0.callback=false"
                 + "&timeout=" + timeout
                 + "&retries=0"
-                + "&" + CALLBACK_INSTANCES_LIMIT_KEY + "=" + callbacks
-        );
+                + "&" + CALLBACK_INSTANCES_LIMIT_KEY + "=" + callbacks)
+            .setScopeModel(ApplicationModel.defaultModel().getDefaultModule())
+            .setServiceModel(new ConsumerModel(IDemoService.class.getName(), null, null,
+                ApplicationModel.defaultModel().getDefaultModule(), null, null, ClassUtils.getClassLoader(IDemoService.class)));
+
         //      uncomment is unblock invoking
 //        serviceURL = serviceURL.addParameter("yyy."+Constants.ASYNC_KEY,String.valueOf(true));
 //        consumerUrl = consumerUrl.addParameter("yyy."+Constants.ASYNC_KEY,String.valueOf(true));
@@ -96,7 +103,7 @@ public class ArgumentCallbackTest {
     }
 
     public void destroyService() {
-        ApplicationModel.getServiceRepository().destroy();
+        ApplicationModel.defaultModel().getApplicationServiceRepository().destroy();
         demoProxy = null;
         try {
             if (exporter != null) exporter.unexport();
@@ -105,13 +112,13 @@ public class ArgumentCallbackTest {
         } catch (Exception e) {
         }
     }
-    
+
     @Test
     public void TestCallbackNormalWithBindPort() throws Exception {
         initOrResetUrl(1, 10000000);
-        consumerUrl = serviceURL.addParameter(Constants.BIND_PORT_KEY,"7653");
+        consumerUrl = serviceURL.addParameter(Constants.BIND_PORT_KEY, "7653");
         initOrResetService();
-       
+
         final AtomicInteger count = new AtomicInteger(0);
 
         demoProxy.xxx(new IDemoCallback() {

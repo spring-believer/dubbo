@@ -23,7 +23,6 @@ import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.ConcurrentHashSet;
 import org.apache.dubbo.common.utils.UrlUtils;
 import org.apache.dubbo.registry.NotifyListener;
-import org.apache.dubbo.registry.RegistryNotifier;
 import org.apache.dubbo.registry.support.CacheableFailbackRegistry;
 import org.apache.dubbo.remoting.Constants;
 import org.apache.dubbo.remoting.zookeeper.ChildListener;
@@ -42,6 +41,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 
 import static org.apache.dubbo.common.constants.CommonConstants.ANY_VALUE;
+import static org.apache.dubbo.common.constants.CommonConstants.CHECK_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.INTERFACE_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.PATH_SEPARATOR;
 import static org.apache.dubbo.common.constants.RegistryConstants.CONFIGURATORS_CATEGORY;
@@ -56,9 +56,9 @@ import static org.apache.dubbo.common.constants.RegistryConstants.ROUTERS_CATEGO
  */
 public class ZookeeperRegistry extends CacheableFailbackRegistry {
 
-    private final static Logger logger = LoggerFactory.getLogger(ZookeeperRegistry.class);
+    private static final Logger logger = LoggerFactory.getLogger(ZookeeperRegistry.class);
 
-    private final static String DEFAULT_ROOT = "dubbo";
+    private static final String DEFAULT_ROOT = "dubbo";
 
     private final String root;
 
@@ -66,7 +66,7 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
 
     private final ConcurrentMap<URL, ConcurrentMap<NotifyListener, ChildListener>> zkListeners = new ConcurrentHashMap<>();
 
-    private final ZookeeperClient zkClient;
+    private ZookeeperClient zkClient;
 
     public ZookeeperRegistry(URL url, ZookeeperTransporter zookeeperTransporter) {
         super(url);
@@ -78,12 +78,12 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
             group = PATH_SEPARATOR + group;
         }
         this.root = group;
-        zkClient = zookeeperTransporter.connect(url);
-        zkClient.addStateListener((state) -> {
+        this.zkClient = zookeeperTransporter.connect(url);
+        this.zkClient.addStateListener((state) -> {
             if (state == StateListener.RECONNECTED) {
                 logger.warn("Trying to fetch the latest urls, in case there're provider changes during connection loss.\n" +
-                        " Since ephemeral ZNode will not get deleted for a connection lose, " +
-                        "there's no need to re-register url of this instance.");
+                    " Since ephemeral ZNode will not get deleted for a connection lose, " +
+                    "there's no need to re-register url of this instance.");
                 ZookeeperRegistry.this.fetchLatestAddresses();
             } else if (state == StateListener.NEW_SESSION_CREATED) {
                 logger.warn("Trying to re-register urls and re-subscribe listeners of this instance to registry...");
@@ -94,7 +94,7 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
                 }
             } else if (state == StateListener.SESSION_LOST) {
                 logger.warn("Url of this instance will be deleted from registry soon. " +
-                        "Dubbo client will try to re-register once a new session is created.");
+                    "Dubbo client will try to re-register once a new session is created.");
             } else if (state == StateListener.SUSPENDED) {
 
             } else if (state == StateListener.CONNECTED) {
@@ -105,22 +105,27 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
 
     @Override
     public boolean isAvailable() {
-        return zkClient.isConnected();
+        return zkClient != null && zkClient.isConnected();
     }
 
     @Override
     public void destroy() {
         super.destroy();
-        try {
-            zkClient.close();
-        } catch (Exception e) {
-            logger.warn("Failed to close zookeeper client " + getUrl() + ", cause: " + e.getMessage(), e);
+        // Just release zkClient reference, but can not close zk client here for zk client is shared somewhere else.
+        // See org.apache.dubbo.remoting.zookeeper.AbstractZookeeperTransporter#destroy()
+        zkClient = null;
+    }
+
+    private void checkDestroyed() {
+        if (zkClient == null) {
+            throw new IllegalStateException("registry is destroyed");
         }
     }
 
     @Override
     public void doRegister(URL url) {
         try {
+            checkDestroyed();
             zkClient.create(toUrlPath(url), url.getParameter(DYNAMIC_KEY, true));
         } catch (Throwable e) {
             throw new RpcException("Failed to register " + url + " to zookeeper " + getUrl() + ", cause: " + e.getMessage(), e);
@@ -130,6 +135,7 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
     @Override
     public void doUnregister(URL url) {
         try {
+            checkDestroyed();
             zkClient.delete(toUrlPath(url));
         } catch (Throwable e) {
             throw new RpcException("Failed to unregister " + url + " to zookeeper " + getUrl() + ", cause: " + e.getMessage(), e);
@@ -139,16 +145,18 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
     @Override
     public void doSubscribe(final URL url, final NotifyListener listener) {
         try {
+            checkDestroyed();
             if (ANY_VALUE.equals(url.getServiceInterface())) {
                 String root = toRootPath();
+                boolean check = url.getParameter(CHECK_KEY, false);
                 ConcurrentMap<NotifyListener, ChildListener> listeners = zkListeners.computeIfAbsent(url, k -> new ConcurrentHashMap<>());
-                ChildListener zkListener = listeners.computeIfAbsent(listener, k -> (parentPath, currentChilds) -> {
-                    for (String child : currentChilds) {
+                ChildListener zkListener = listeners.computeIfAbsent(listener, k -> (parentPath, currentChildren) -> {
+                    for (String child : currentChildren) {
                         child = URL.decode(child);
                         if (!anyServices.contains(child)) {
                             anyServices.add(child);
                             subscribe(url.setPath(child).addParameters(INTERFACE_KEY, child,
-                                    Constants.CHECK_KEY, String.valueOf(false)), k);
+                                Constants.CHECK_KEY, String.valueOf(check)), k);
                         }
                     }
                 });
@@ -159,27 +167,30 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
                         service = URL.decode(service);
                         anyServices.add(service);
                         subscribe(url.setPath(service).addParameters(INTERFACE_KEY, service,
-                                Constants.CHECK_KEY, String.valueOf(false)), listener);
+                            Constants.CHECK_KEY, String.valueOf(check)), listener);
                     }
                 }
             } else {
                 CountDownLatch latch = new CountDownLatch(1);
-                List<URL> urls = new ArrayList<>();
-                for (String path : toCategoriesPath(url)) {
-                    ConcurrentMap<NotifyListener, ChildListener> listeners = zkListeners.computeIfAbsent(url, k -> new ConcurrentHashMap<>());
-                    ChildListener zkListener = listeners.computeIfAbsent(listener, k -> new RegistryChildListenerImpl(url, path, k, latch));
-                    if (zkListener instanceof RegistryChildListenerImpl) {
-                        ((RegistryChildListenerImpl) zkListener).setLatch(latch);
+                try {
+                    List<URL> urls = new ArrayList<>();
+                    for (String path : toCategoriesPath(url)) {
+                        ConcurrentMap<NotifyListener, ChildListener> listeners = zkListeners.computeIfAbsent(url, k -> new ConcurrentHashMap<>());
+                        ChildListener zkListener = listeners.computeIfAbsent(listener, k -> new RegistryChildListenerImpl(url, k, latch));
+                        if (zkListener instanceof RegistryChildListenerImpl) {
+                            ((RegistryChildListenerImpl) zkListener).setLatch(latch);
+                        }
+                        zkClient.create(path, false);
+                        List<String> children = zkClient.addChildListener(path, zkListener);
+                        if (children != null) {
+                            urls.addAll(toUrlsWithEmpty(url, path, children));
+                        }
                     }
-                    zkClient.create(path, false);
-                    List<String> children = zkClient.addChildListener(path, zkListener);
-                    if (children != null) {
-                        urls.addAll(toUrlsWithEmpty(url, path, children));
-                    }
+                    notify(url, listener, urls);
+                } finally {
+                    // tells the listener to run only after the sync notification of main thread finishes.
+                    latch.countDown();
                 }
-                notify(url, listener, urls);
-                // tells the listener to run only after the sync notification of main thread finishes.
-                latch.countDown();
             }
         } catch (Throwable e) {
             throw new RpcException("Failed to subscribe " + url + " to zookeeper " + getUrl() + ", cause: " + e.getMessage(), e);
@@ -188,6 +199,7 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
 
     @Override
     public void doUnsubscribe(URL url, NotifyListener listener) {
+        checkDestroyed();
         ConcurrentMap<NotifyListener, ChildListener> listeners = zkListeners.get(url);
         if (listeners != null) {
             ChildListener zkListener = listeners.remove(listener);
@@ -202,7 +214,7 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
                 }
             }
 
-            if(listeners.isEmpty()){
+            if (listeners.isEmpty()) {
                 zkListeners.remove(url);
             }
         }
@@ -214,6 +226,7 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
             throw new IllegalArgumentException("lookup url == null");
         }
         try {
+            checkDestroyed();
             List<String> providers = new ArrayList<>();
             for (String path : toCategoriesPath(url)) {
                 List<String> children = zkClient.getChildren(path);
@@ -295,37 +308,12 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
     }
 
     private class RegistryChildListenerImpl implements ChildListener {
-        private RegistryNotifier notifier;
-        private long lastExecuteTime;
+        private final ZookeeperRegistryNotifier notifier;
         private volatile CountDownLatch latch;
 
-        public RegistryChildListenerImpl(URL consumerUrl, String path, NotifyListener listener, CountDownLatch latch) {
+        public RegistryChildListenerImpl(URL consumerUrl, NotifyListener listener, CountDownLatch latch) {
             this.latch = latch;
-            notifier = new RegistryNotifier(ZookeeperRegistry.this.getDelay()) {
-                @Override
-                public void notify(Object rawAddresses) {
-                    long delayTime = getDelayTime();
-                    if (delayTime <= 0) {
-                        this.doNotify(rawAddresses);
-                    } else {
-                        long interval = delayTime - (System.currentTimeMillis() - lastExecuteTime);
-                        if (interval > 0) {
-                            try {
-                                Thread.sleep(interval);
-                            } catch (InterruptedException e) {
-                                // ignore
-                            }
-                        }
-                        lastExecuteTime = System.currentTimeMillis();
-                        this.doNotify(rawAddresses);
-                    }
-                }
-
-                @Override
-                protected void doNotify(Object rawAddresses) {
-                    ZookeeperRegistry.this.notify(consumerUrl, listener, ZookeeperRegistry.this.toUrlsWithEmpty(consumerUrl, path, (List<String>) rawAddresses));
-                }
-            };
+            this.notifier = new ZookeeperRegistryNotifier(consumerUrl, listener, ZookeeperRegistry.this.getDelay());
         }
 
         public void setLatch(CountDownLatch latch) {
@@ -339,7 +327,50 @@ public class ZookeeperRegistry extends CacheableFailbackRegistry {
             } catch (InterruptedException e) {
                 logger.warn("Zookeeper children listener thread was interrupted unexpectedly, may cause race condition with the main thread.");
             }
-            notifier.notify(children);
+            notifier.notify(path, children);
+        }
+    }
+
+    /**
+     * Customized Registry Notifier for zookeeper registry.
+     */
+    public class ZookeeperRegistryNotifier {
+        private long lastExecuteTime;
+        private final URL consumerUrl;
+        private final NotifyListener listener;
+        private final long delayTime;
+
+        public ZookeeperRegistryNotifier(URL consumerUrl, NotifyListener listener, long delayTime) {
+            this.consumerUrl = consumerUrl;
+            this.listener = listener;
+            this.delayTime = delayTime;
+        }
+
+        public void notify(String path, Object rawAddresses) {
+            // notify immediately if it's notification of governance rules.
+            if (path.endsWith(CONFIGURATORS_CATEGORY) || path.endsWith(ROUTERS_CATEGORY)) {
+                this.doNotify(path, rawAddresses);
+            }
+
+            // if address notification, check if delay is necessary.
+            if (delayTime <= 0) {
+                this.doNotify(path, rawAddresses);
+            } else {
+                long interval = delayTime - (System.currentTimeMillis() - lastExecuteTime);
+                if (interval > 0) {
+                    try {
+                        Thread.sleep(interval);
+                    } catch (InterruptedException e) {
+                        // ignore
+                    }
+                }
+                lastExecuteTime = System.currentTimeMillis();
+                this.doNotify(path, rawAddresses);
+            }
+        }
+
+        protected void doNotify(String path, Object rawAddresses) {
+            ZookeeperRegistry.this.notify(consumerUrl, listener, ZookeeperRegistry.this.toUrlsWithEmpty(consumerUrl, path, (List<String>) rawAddresses));
         }
     }
 }

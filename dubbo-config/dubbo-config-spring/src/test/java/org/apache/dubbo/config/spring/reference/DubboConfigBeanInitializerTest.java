@@ -19,10 +19,12 @@ package org.apache.dubbo.config.spring.reference;
 
 import org.apache.dubbo.config.annotation.DubboReference;
 import org.apache.dubbo.config.bootstrap.DubboBootstrap;
-import org.apache.dubbo.config.spring.ZooKeeperServer;
 import org.apache.dubbo.config.spring.api.HelloService;
 import org.apache.dubbo.config.spring.context.DubboConfigBeanInitializer;
 import org.apache.dubbo.config.spring.context.annotation.provider.ProviderConfiguration;
+import org.apache.dubbo.config.spring.util.DubboBeanUtils;
+
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -38,7 +40,6 @@ import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -53,7 +54,7 @@ import java.util.List;
     })
 @TestPropertySource(properties = {
     "dubbo.protocol.port=-1",
-    "dubbo.registry.address=zookeeper://127.0.0.1:2181"
+    "dubbo.registry.address=${zookeeper.connection.address}"
 })
 @EnableAspectJAutoProxy(proxyTargetClass = true, exposeProxy = true)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_EACH_TEST_METHOD)
@@ -61,8 +62,14 @@ public class DubboConfigBeanInitializerTest {
 
     @BeforeAll
     public static void beforeAll() {
-        ZooKeeperServer.start();
+        DubboBootstrap.reset();
     }
+
+    @AfterAll
+    public static void afterAll() {
+        DubboBootstrap.reset();
+    }
+
 
     @Autowired
     private FooService fooService;
@@ -97,8 +104,10 @@ public class DubboConfigBeanInitializerTest {
     @Configuration
     static class BusinessConfig {
         @Bean
-        public FooService fooService() {
-            // DubboBootstrap should be inited at DubboConfigInitializer, before init FooService bean
+        public FooService fooService(ApplicationContext applicationContext) {
+            // Dubbo config beans should be initialized at DubboConfigInitializer, before init FooService bean
+            Assertions.assertTrue(DubboBeanUtils.getModuleModel(applicationContext).getDeployer().isInitialized());
+            Assertions.assertTrue(DubboBeanUtils.getApplicationModel(applicationContext).getDeployer().isInitialized());
             Assertions.assertTrue(DubboBootstrap.getInstance().isInitialized());
             return new FooService();
         }

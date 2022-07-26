@@ -17,9 +17,9 @@
 package org.apache.dubbo.qos.protocol;
 
 import org.apache.dubbo.common.URL;
+import org.apache.dubbo.common.extension.Activate;
 import org.apache.dubbo.common.logger.Logger;
 import org.apache.dubbo.common.logger.LoggerFactory;
-import org.apache.dubbo.common.utils.UrlUtils;
 import org.apache.dubbo.qos.common.QosConstants;
 import org.apache.dubbo.qos.server.Server;
 import org.apache.dubbo.rpc.Exporter;
@@ -27,6 +27,8 @@ import org.apache.dubbo.rpc.Invoker;
 import org.apache.dubbo.rpc.Protocol;
 import org.apache.dubbo.rpc.ProtocolServer;
 import org.apache.dubbo.rpc.RpcException;
+import org.apache.dubbo.rpc.model.FrameworkModel;
+import org.apache.dubbo.rpc.model.ScopeModelAware;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -36,14 +38,16 @@ import static org.apache.dubbo.common.constants.QosConstants.QOS_ENABLE;
 import static org.apache.dubbo.common.constants.QosConstants.QOS_HOST;
 import static org.apache.dubbo.common.constants.QosConstants.QOS_PORT;
 
-
-public class QosProtocolWrapper implements Protocol {
+@Activate(order = 200)
+public class QosProtocolWrapper implements Protocol, ScopeModelAware {
 
     private final Logger logger = LoggerFactory.getLogger(QosProtocolWrapper.class);
 
-    private static AtomicBoolean hasStarted = new AtomicBoolean(false);
+    private AtomicBoolean hasStarted = new AtomicBoolean(false);
 
     private Protocol protocol;
+
+    private FrameworkModel frameworkModel;
 
     public QosProtocolWrapper(Protocol protocol) {
         if (protocol == null) {
@@ -53,25 +57,24 @@ public class QosProtocolWrapper implements Protocol {
     }
 
     @Override
+    public void setFrameworkModel(FrameworkModel frameworkModel) {
+        this.frameworkModel = frameworkModel;
+    }
+
+    @Override
     public int getDefaultPort() {
         return protocol.getDefaultPort();
     }
 
     @Override
     public <T> Exporter<T> export(Invoker<T> invoker) throws RpcException {
-        if (UrlUtils.isRegistry(invoker.getUrl())) {
-            startQosServer(invoker.getUrl());
-            return protocol.export(invoker);
-        }
+        startQosServer(invoker.getUrl());
         return protocol.export(invoker);
     }
 
     @Override
     public <T> Invoker<T> refer(Class<T> type, URL url) throws RpcException {
-        if (UrlUtils.isRegistry(url)) {
-            startQosServer(url);
-            return protocol.refer(type, url);
-        }
+        startQosServer(url);
         return protocol.refer(type, url);
     }
 
@@ -95,15 +98,15 @@ public class QosProtocolWrapper implements Protocol {
             boolean qosEnable = url.getParameter(QOS_ENABLE, true);
             if (!qosEnable) {
                 logger.info("qos won't be started because it is disabled. " +
-                        "Please check dubbo.application.qos.enable is configured either in system property, " +
-                        "dubbo.properties or XML/spring-boot configuration.");
+                    "Please check dubbo.application.qos.enable is configured either in system property, " +
+                    "dubbo.properties or XML/spring-boot configuration.");
                 return;
             }
 
             String host = url.getParameter(QOS_HOST);
             int port = url.getParameter(QOS_PORT, QosConstants.DEFAULT_PORT);
             boolean acceptForeignIp = Boolean.parseBoolean(url.getParameter(ACCEPT_FOREIGN_IP, "false"));
-            Server server = Server.getInstance();
+            Server server = frameworkModel.getBeanFactory().getBean(Server.class);
             server.setHost(host);
             server.setPort(port);
             server.setAcceptForeignIp(acceptForeignIp);
@@ -116,7 +119,7 @@ public class QosProtocolWrapper implements Protocol {
 
     /*package*/ void stopServer() {
         if (hasStarted.compareAndSet(true, false)) {
-            Server server = Server.getInstance();
+            Server server = frameworkModel.getBeanFactory().getBean(Server.class);
             server.stop();
         }
     }

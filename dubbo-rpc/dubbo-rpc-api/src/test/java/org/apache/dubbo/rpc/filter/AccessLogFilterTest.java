@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.Map;
-import java.util.Set;
+import java.util.Queue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -63,13 +63,13 @@ public class AccessLogFilterTest {
         Invoker<AccessLogFilterTest> invoker = new MyInvoker<AccessLogFilterTest>(url);
         Invocation invocation = new MockInvocation();
 
-        Field field = AccessLogFilter.class.getDeclaredField("LOG_ENTRIES");
+        Field field = AccessLogFilter.class.getDeclaredField("logEntries");
         field.setAccessible(true);
-        assertTrue(((Map) field.get(AccessLogFilter.class)).isEmpty());
+        assertTrue(((Map) field.get(accessLogFilter)).isEmpty());
 
         accessLogFilter.invoke(invoker, invocation);
 
-        Map<String, Set<AccessLogData>> logs = (Map<String, Set<AccessLogData>>) field.get(AccessLogFilter.class);
+        Map<String, Queue<AccessLogData>> logs = (Map<String, Queue<AccessLogData>>) field.get(accessLogFilter);
         assertFalse(logs.isEmpty());
         assertFalse(logs.get("true").isEmpty());
         AccessLogData log = logs.get("true").iterator().next();

@@ -17,10 +17,11 @@
 package org.apache.dubbo.config.spring.propertyconfigurer.consumer2;
 
 import org.apache.dubbo.config.bootstrap.DubboBootstrap;
-import org.apache.dubbo.config.spring.ZooKeeperServer;
 import org.apache.dubbo.config.spring.api.HelloService;
 import org.apache.dubbo.config.spring.context.annotation.EnableDubbo;
 import org.apache.dubbo.config.spring.propertyconfigurer.consumer.DemoBeanFactoryPostProcessor;
+
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -31,12 +32,18 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportResource;
 import org.springframework.context.support.ClassPathXmlApplicationContext;
 
+import java.net.InetSocketAddress;
+
 public class PropertySourcesConfigurerTest {
 
     @BeforeAll
-    public static void setUp() {
+    public static void beforeAll() {
         DubboBootstrap.reset();
-        ZooKeeperServer.start();
+    }
+
+    @AfterAll
+    public static void afterAll() {
+        DubboBootstrap.reset();
     }
 
     @Test
@@ -46,14 +53,7 @@ public class PropertySourcesConfigurerTest {
         try {
             providerContext.start();
 
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-            }
-
-            // reset config
-            DubboBootstrap.reset(false);
-
+            // consumer app
             // Resolve placeholder by PropertySourcesPlaceholderConfigurer in dubbo-consumer.xml, without import property source.
             AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(ConsumerConfiguration.class);
             try {
@@ -61,7 +61,7 @@ public class PropertySourcesConfigurerTest {
                 HelloService service = (HelloService) context.getBean("demoService");
                 String result = service.sayHello("world");
                 System.out.println("result: " + result);
-                Assertions.assertEquals("Hello world, response from provider: 127.0.0.1:0", result);
+                Assertions.assertEquals("Hello world, response from provider: " + InetSocketAddress.createUnresolved("127.0.0.1", 0), result);
             } finally {
                 context.close();
             }

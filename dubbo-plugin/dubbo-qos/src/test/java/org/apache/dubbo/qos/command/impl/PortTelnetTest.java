@@ -20,12 +20,13 @@ import org.apache.dubbo.common.URL;
 import org.apache.dubbo.common.utils.NetUtils;
 import org.apache.dubbo.qos.command.BaseCommand;
 import org.apache.dubbo.qos.command.CommandContext;
-import org.apache.dubbo.qos.legacy.ProtocolUtils;
 import org.apache.dubbo.qos.legacy.service.DemoService;
 import org.apache.dubbo.remoting.RemotingException;
 import org.apache.dubbo.remoting.exchange.ExchangeClient;
 import org.apache.dubbo.remoting.exchange.Exchangers;
 import org.apache.dubbo.rpc.Invoker;
+import org.apache.dubbo.rpc.Protocol;
+import org.apache.dubbo.rpc.model.FrameworkModel;
 import org.apache.dubbo.rpc.protocol.dubbo.DubboProtocol;
 
 import org.junit.jupiter.api.AfterEach;
@@ -39,7 +40,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 
 public class PortTelnetTest {
-    private static final BaseCommand port = new PortTelnet();
+    private BaseCommand port;
 
     private Invoker<DemoService> mockInvoker;
     private CommandContext mockCommandContext;
@@ -49,17 +50,19 @@ public class PortTelnetTest {
     @SuppressWarnings("unchecked")
     @BeforeEach
     public void before() {
+        FrameworkModel frameworkModel = FrameworkModel.defaultModel();
+        port = new PortTelnet(frameworkModel);
         mockCommandContext = mock(CommandContext.class);
         mockInvoker = mock(Invoker.class);
         given(mockInvoker.getInterface()).willReturn(DemoService.class);
         given(mockInvoker.getUrl()).willReturn(URL.valueOf("dubbo://127.0.0.1:" + availablePort + "/demo"));
 
-        DubboProtocol.getDubboProtocol().export(mockInvoker);
+        frameworkModel.getExtensionLoader(Protocol.class).getExtension(DubboProtocol.NAME).export(mockInvoker);
     }
 
     @AfterEach
-    public void after() {
-        ProtocolUtils.closeAll();
+    public void afterEach() {
+        FrameworkModel.destroyAll();
         reset(mockInvoker, mockCommandContext);
     }
 
@@ -71,7 +74,7 @@ public class PortTelnetTest {
     public void testListClient() throws Exception {
         ExchangeClient client1 = Exchangers.connect("dubbo://127.0.0.1:" + availablePort + "/demo");
         ExchangeClient client2 = Exchangers.connect("dubbo://127.0.0.1:" + availablePort + "/demo");
-        Thread.sleep(5000);
+        Thread.sleep(100);
         String result = port.execute(mockCommandContext, new String[]{"-l", availablePort + ""});
         String client1Addr = client1.getLocalAddress().toString();
         String client2Addr = client2.getLocalAddress().toString();

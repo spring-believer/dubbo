@@ -17,8 +17,8 @@
 package org.apache.dubbo.config.spring.boot.importxml;
 
 import org.apache.dubbo.config.bootstrap.DubboBootstrap;
-import org.apache.dubbo.config.spring.ZooKeeperServer;
 import org.apache.dubbo.config.spring.api.HelloService;
+
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -44,13 +44,12 @@ import org.springframework.context.annotation.ImportResource;
 public class SpringBootImportDubboXmlTest {
 
     @BeforeAll
-    public static void setUp(){
-        ZooKeeperServer.start();
+    public static void beforeAll(){
         DubboBootstrap.reset();
     }
 
     @AfterAll
-    public static void tearDown(){
+    public static void afterAll(){
         DubboBootstrap.reset();
     }
 
